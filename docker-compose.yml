@@ -1,0 +1,121 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --save "" --appendonly no --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        labels: service
+
+  api:
+    build: .
+    image: gisul/execution-engine-py:latest
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - SERVICE_NAME=execution-engine-api
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REDIS_URL=redis://redis:6379/0
+      - HOST_SANDBOX_ROOT=${HOST_SANDBOX_ROOT}
+      - CONTAINER_SANDBOX_ROOT=/sandbox
+      - QUEUE_RESULT_TIMEOUT_SECONDS=${QUEUE_RESULT_TIMEOUT_SECONDS:-900}
+      - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-true}
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_SANDBOX_ROOT}:/sandbox
+    tmpfs:
+      - /tmp/prometheus_multiproc
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+    labels:
+      service: execution-engine-api
+
+  worker:
+    build: .
+    image: gisul/execution-engine-py:latest
+    restart: always
+    command: python worker.py
+    environment:
+      - SERVICE_NAME=execution-engine-worker
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REDIS_URL=redis://redis:6379/0
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-8}
+      - WORKER_METRICS_PORT=9101
+      - WORKER_LANGUAGES=${WORKER_LANGUAGES:-python,javascript,c,java,kotlin,go,rust,typescript,cpp,csharp}
+      - HOST_SANDBOX_ROOT=${HOST_SANDBOX_ROOT}
+      - CONTAINER_SANDBOX_ROOT=/sandbox
+      - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-true}
+      - EXECUTION_TIMEOUT_SECONDS=${EXECUTION_TIMEOUT_SECONDS:-10}
+      - WARM_POOL_MAX_PER_IMAGE=${WARM_POOL_MAX_PER_IMAGE:-50}
+      - WARM_CONTAINER_TTL_SECONDS=${WARM_CONTAINER_TTL_SECONDS:-300}
+      - CPP_PREWARM_TARGET=${CPP_PREWARM_TARGET:-0}
+      - CPP_COMPILE_OPT_LEVEL=${CPP_COMPILE_OPT_LEVEL:--O0}
+      - DOCKER_RUN_CONCURRENCY=${DOCKER_RUN_CONCURRENCY:-6}
+      - COMPILE_CONCURRENCY=${COMPILE_CONCURRENCY:-3}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_SANDBOX_ROOT}:/sandbox
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=5).read()"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+    labels:
+      service: execution-engine-worker
+    # Scale workers up only after the single-request C++ latency is acceptable.
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: always
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+      - worker
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    restart: always
+    ports:
+      - "8001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_DEFAULT_THEME=light
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
