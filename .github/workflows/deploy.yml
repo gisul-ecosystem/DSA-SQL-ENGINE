@@ -23,13 +23,13 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: gisul/execution-engine-py:latest
+          tags: gisuldocker/execution-engine-py:latest
 
   deploy:
     needs: build
     runs-on: self-hosted
     env:
-      IMAGE: gisul/execution-engine-py:latest
+      IMAGE: gisuldocker/execution-engine-py:latest
       SANDBOX_HOST_PATH: ${{ secrets.SANDBOX_HOST_PATH }}
       WORKER_SCALE: ${{ vars.WORKER_SCALE || '2' }}
       WORKER_CONCURRENCY: ${{ vars.WORKER_CONCURRENCY || '8' }}
