@@ -27,7 +27,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: self-hosted
+    runs-on: engine
     env:
       IMAGE: gisuldocker/execution-engine-py:latest
       SANDBOX_HOST_PATH: ${{ secrets.SANDBOX_HOST_PATH }}
