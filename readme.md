@@ -3,7 +3,7 @@
 Ephemeral code execution and judging API for DSA-style problems.  
 The service accepts user code + test cases, runs the code inside language-specific Docker sandboxes, and returns a verdict (`accepted`, `wrong_answer`, `runtime_error`, or `compilation_error`).
 
-## What This Project Does
+## What This Project Does.
 
 - Exposes a single HTTP API endpoint: `POST /execute`
 - Supports multiple languages:
