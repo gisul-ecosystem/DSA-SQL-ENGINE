@@ -16,7 +16,7 @@ services:
 
   api:
     build: .
-    image: gisul/execution-engine-py:latest
+    image: gisuldocker/execution-engine-py:latest
     restart: always
     ports:
       - "8000:8000"
@@ -48,7 +48,7 @@ services:
 
   worker:
     build: .
-    image: gisul/execution-engine-py:latest
+    image: gisuldocker/execution-engine-py:latest
     restart: always
     command: python worker.py
     environment:
