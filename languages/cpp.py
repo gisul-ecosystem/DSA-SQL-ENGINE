@@ -36,6 +36,7 @@ DEVNULL = asyncio.subprocess.DEVNULL
 
 class CppExecutor(BaseExecutor):
     IMAGE_NAME = "cpp-sandbox:latest"
+    _SUPPORTED_POINTER_TYPES = {"int*", "ListNode*", "TreeNode*"}
 
     def __init__(self, code: str, function_name: str):
         super().__init__(code, function_name)
@@ -192,7 +193,7 @@ class CppExecutor(BaseExecutor):
                 param_deserialization.append('}')
                 param_deserialization.append(f'TreeNode* {param_name} = buildTree({param_name}_vec);')
             else:
-                raise CompileError(f"Unsupported type: {clean_type}")
+                raise CompileError(self._unsupported_type_message(clean_type))
 
             param_names.append(param_name)
 
@@ -244,3 +245,13 @@ class CppExecutor(BaseExecutor):
                 params.append((param_type.strip(), param_name.strip()))
 
         return return_type, params
+
+    def _unsupported_type_message(self, clean_type: str) -> str:
+        if clean_type.endswith("*") and clean_type not in self._SUPPORTED_POINTER_TYPES:
+            base_type = clean_type[:-1].strip()
+            return (
+                f"Unsupported type: {clean_type}. "
+                f"For linked list problems, use ListNode* instead of {base_type}* "
+                f"and access node values with val/next."
+            )
+        return f"Unsupported type: {clean_type}"
