@@ -191,11 +191,8 @@ class CExecutor(BaseExecutor):
         first_input_array_size: str | None = None
 
         for param_type, param_name in params:
-            if is_void and output_param and (param_type, param_name) == output_param:
-                param_names.append(param_name)
-                continue
-
             clean_type = param_type.replace("const", "").strip()
+            clean_type = re.sub(r"\s+", "", clean_type)
 
             if clean_type == "int":
                 param_deserialization.append(f'int {param_name} = j["{param_name}"];')
@@ -210,6 +207,34 @@ class CExecutor(BaseExecutor):
                 param_deserialization.append(f'int* {param_name} = {param_name}_vec.data();')
                 if first_input_array_size is None:
                     first_input_array_size = f"{param_name}_vec.size()"
+            elif re.fullmatch(r"int\[\d+\]", clean_type):
+                dim = re.findall(r"\d+", clean_type)[0]
+                param_deserialization.append(
+                    f'vector<int> {param_name}_vec = j["{param_name}"].get<vector<int>>();'
+                )
+                param_deserialization.append(f'int {param_name}[{dim}] = {{0}};')
+                param_deserialization.append(
+                    f'for (size_t i = 0; i < {param_name}_vec.size() && i < {dim}; ++i) {param_name}[i] = {param_name}_vec[i];'
+                )
+                if first_input_array_size is None:
+                    first_input_array_size = f"{param_name}_vec.size()"
+            elif re.fullmatch(r"int\[\d+\]\[\d+\]", clean_type):
+                rows, cols = re.findall(r"\d+", clean_type)
+                param_deserialization.append(
+                    f'vector<vector<int>> {param_name}_vec = j["{param_name}"].get<vector<vector<int>>>();'
+                )
+                param_deserialization.append(f'int {param_name}[{rows}][{cols}] = {{0}};')
+                param_deserialization.append(
+                    f'for (size_t i = 0; i < {param_name}_vec.size() && i < {rows}; ++i) {{'
+                )
+                param_deserialization.append(
+                    f'    for (size_t j_idx = 0; j_idx < {param_name}_vec[i].size() && j_idx < {cols}; ++j_idx) {{'
+                )
+                param_deserialization.append(
+                    f'        {param_name}[i][j_idx] = {param_name}_vec[i][j_idx];'
+                )
+                param_deserialization.append('    }')
+                param_deserialization.append('}')
             elif clean_type == "char*":
                 param_deserialization.append(f'string {param_name}_tmp = j["{param_name}"];')
                 param_deserialization.append(f'char* {param_name} = (char*){param_name}_tmp.c_str();')
@@ -218,7 +243,20 @@ class CExecutor(BaseExecutor):
 
             param_names.append(param_name)
 
-        if is_void and output_param:
+        output_param_already_initialized = False
+        if output_param:
+            output_clean_type = re.sub(r"\s+", "", output_param[0].replace("const", "").strip())
+            output_param_already_initialized = output_clean_type in {
+                re.sub(r"\s+", "", pt.replace("const", "").strip()) for pt, pn in params if pn == output_param[1]
+            } and any(
+                output_param[1] in line and (
+                    f'{output_param[1]}_vec = j["{output_param[1]}"]' in line
+                    or f'{output_param[1]}_tmp = j["{output_param[1]}"]' in line
+                )
+                for line in param_deserialization
+            )
+
+        if is_void and output_param and not output_param_already_initialized:
             out_name = output_param[1]
             size_expr = first_input_array_size or "0"
             param_deserialization.append(f'vector<int> {out_name}_vec({size_expr});')
@@ -237,6 +275,10 @@ class CExecutor(BaseExecutor):
 
         def decl_param(param_type: str, param_name: str) -> str:
             normalized = param_type if param_type != "int[]" else "int*"
+            array_match = re.fullmatch(r"(.+?)(\[[^\]]+\](?:\[[^\]]+\])*)", normalized.replace(" ", ""))
+            if array_match:
+                base_type, suffix = array_match.groups()
+                return f"{base_type} {param_name}{suffix}"
             return f"{normalized} {param_name}"
 
         forward_decl = (
@@ -275,12 +317,15 @@ class CExecutor(BaseExecutor):
                 while raw_name.startswith("*"):
                     pointer_prefix += "*"
                     raw_name = raw_name[1:]
+                array_suffix = "".join(re.findall(r"(\[[^\]]*\])", raw_name))
                 is_array = "[]" in raw_name
-                param_name = raw_name.replace("&", "").replace("*", "").replace("[", "").replace("]", "")
+                param_name = re.sub(r"\[[^\]]*\]", "", raw_name).replace("&", "").replace("*", "")
                 param_type = " ".join(parts[:-1]).replace("&", "").strip()
                 if pointer_prefix:
                     param_type = f"{param_type}{pointer_prefix}"
-                if is_array and "[]" not in param_type and "*" not in param_type:
+                if array_suffix and "*" not in param_type:
+                    param_type = f"{param_type}{array_suffix}"
+                elif is_array and "[]" not in param_type and "*" not in param_type:
                     param_type = param_type + "[]"
                 params.append((param_type, param_name))
 

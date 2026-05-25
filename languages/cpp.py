@@ -156,6 +156,7 @@ class CppExecutor(BaseExecutor):
 
         for param_type, param_name in params:
             clean_type = param_type.replace("const", "").replace("&", "").strip()
+            clean_type = re.sub(r"\s*\*\s*", "*", clean_type)
 
             if clean_type == "int":
                 param_deserialization.append(f'int {param_name} = j["{param_name}"];')
@@ -163,6 +164,11 @@ class CppExecutor(BaseExecutor):
                 param_deserialization.append(f'long long {param_name} = j["{param_name}"];')
             elif clean_type == "string":
                 param_deserialization.append(f'string {param_name} = j["{param_name}"];')
+            elif clean_type == "int*":
+                param_deserialization.append(
+                    f'vector<int> {param_name}_vec = j["{param_name}"].get<vector<int>>();'
+                )
+                param_deserialization.append(f'int* {param_name} = {param_name}_vec.data();')
             elif clean_type == "vector<int>":
                 param_deserialization.append(
                     f'vector<int> {param_name} = j["{param_name}"].get<vector<int>>();'
@@ -226,8 +232,15 @@ class CppExecutor(BaseExecutor):
             raw_params = [p.strip() for p in params_str.split(",")]
             for raw_param in raw_params:
                 parts = raw_param.split()
-                param_name = parts[-1].replace("&", "").replace("*", "")
-                param_type = " ".join(parts[:-1])
+                raw_name = parts[-1]
+                pointer_prefix = ""
+                while raw_name.startswith("*"):
+                    pointer_prefix += "*"
+                    raw_name = raw_name[1:]
+                param_name = raw_name.replace("&", "").replace("*", "")
+                param_type = " ".join(parts[:-1]).strip()
+                if pointer_prefix:
+                    param_type = f"{param_type}{pointer_prefix}"
                 params.append((param_type.strip(), param_name.strip()))
 
         return return_type, params
