@@ -92,6 +92,8 @@ int main() {
 // USER CODE INJECTION
 // ======================================================
 
+extern "C" {
 __USER_CODE_PLACEHOLDER__
+}
 
 """

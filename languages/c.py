@@ -271,9 +271,15 @@ class CExecutor(BaseExecutor):
             for raw_param in raw_params:
                 parts = raw_param.split()
                 raw_name = parts[-1]
+                pointer_prefix = ""
+                while raw_name.startswith("*"):
+                    pointer_prefix += "*"
+                    raw_name = raw_name[1:]
                 is_array = "[]" in raw_name
                 param_name = raw_name.replace("&", "").replace("*", "").replace("[", "").replace("]", "")
                 param_type = " ".join(parts[:-1]).replace("&", "").strip()
+                if pointer_prefix:
+                    param_type = f"{param_type}{pointer_prefix}"
                 if is_array and "[]" not in param_type and "*" not in param_type:
                     param_type = param_type + "[]"
                 params.append((param_type, param_name))
