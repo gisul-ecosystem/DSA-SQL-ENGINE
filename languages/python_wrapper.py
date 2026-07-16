@@ -190,6 +190,14 @@ def auto_convert_inputs(test_input):
         elif key == "pos":
             continue
 
+        # ----- Multiline string to list (operations format) -----
+        elif isinstance(value, str) and chr(10) in value:
+            lines = [l.strip() for l in value.strip().split(chr(10)) if l.strip()]
+            # Drop leading count line if it is a pure integer
+            if lines and lines[0].isdigit():
+                lines = lines[1:]
+            converted[key] = lines
+
         else:
             converted[key] = value
 

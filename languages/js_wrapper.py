@@ -201,6 +201,18 @@ function autoConvertInput(input) {
             continue;
         }
 
+        // String that looks like a multiline operations list:
+        // "N\nOP1\nOP2\n..." — split into array, stripping the count line
+        else if (typeof value === "string" && value.includes("\n")) {
+            const lines = value.trim().split("\n").map(l => l.trim()).filter(l => l.length > 0);
+            // If first line is a pure integer (count), drop it
+            if (lines.length > 0 && /^\d+$/.test(lines[0])) {
+                converted[key] = lines.slice(1);
+            } else {
+                converted[key] = lines;
+            }
+        }
+
         else {
             converted[key] = value;
         }

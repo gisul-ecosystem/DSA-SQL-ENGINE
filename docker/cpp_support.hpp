@@ -1,6 +1,7 @@
 #include <iostream>
 #include <optional>
 #include <queue>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>

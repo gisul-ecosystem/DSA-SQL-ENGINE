@@ -217,6 +217,23 @@ public class Main {
         if (targetType == String.class)
             return value.toString();
 
+        // List<String> or List (raw) — pass through directly since Jackson
+        // already deserializes JSON arrays as ArrayList.  If the value is a
+        // plain String (multiline input format), split it into a List<String>.
+        if (targetType == List.class || targetType == ArrayList.class) {
+            if (value instanceof List)
+                return value;
+            // Multiline string format: "N\nOP1\nOP2\n..." — strip count line and split
+            String s = value.toString().trim();
+            String[] lines = s.split("\\n");
+            int start = 0;
+            try { Integer.parseInt(lines[0].trim()); start = 1; } catch (NumberFormatException ignored) {}
+            List<String> list = new ArrayList<>();
+            for (int i = start; i < lines.length; i++)
+                if (!lines[i].trim().isEmpty()) list.add(lines[i].trim());
+            return list;
+        }
+
         if (targetType == int[].class) {
             List<?> list = (List<?>) value;
             int[] arr = new int[list.size()];

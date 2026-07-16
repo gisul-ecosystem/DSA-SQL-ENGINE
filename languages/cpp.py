@@ -184,6 +184,28 @@ class CppExecutor(BaseExecutor):
                 param_deserialization.append(
                     f'vector<int> {param_name} = {val_expr}.get<vector<int>>();'
                 )
+            elif clean_type == "vector<string>":
+                # Accept both a JSON array of strings and a multiline string
+                # (LeetCode-style "N\nOP1\nOP2\n...") — normalise to vector<string>
+                param_deserialization.append(f'vector<string> {param_name};')
+                param_deserialization.append(f'if ({val_expr}.is_array()) {{')
+                param_deserialization.append(f'    {param_name} = {val_expr}.get<vector<string>>();')
+                param_deserialization.append(f'}} else {{')
+                param_deserialization.append(f'    string _raw = {val_expr}.get<string>();')
+                param_deserialization.append(f'    istringstream _iss(_raw);')
+                param_deserialization.append(f'    string _line;')
+                param_deserialization.append(f'    bool _first = true;')
+                param_deserialization.append(f'    while (getline(_iss, _line)) {{')
+                param_deserialization.append(f'        if (!_line.empty() && _line.back() == \'\\r\') _line.pop_back();')
+                param_deserialization.append(f'        if (_line.empty()) continue;')
+                param_deserialization.append(f'        if (_first) {{ _first = false;')
+                param_deserialization.append(f'            bool _isCount = true;')
+                param_deserialization.append(f'            for (char _c : _line) if (!isdigit(_c)) {{ _isCount = false; break; }}')
+                param_deserialization.append(f'            if (_isCount) continue;')
+                param_deserialization.append(f'        }}')
+                param_deserialization.append(f'        {param_name}.push_back(_line);')
+                param_deserialization.append(f'    }}')
+                param_deserialization.append(f'}}')
             elif clean_type == "vector<vector<int>>":
                 param_deserialization.append(
                     f'vector<vector<int>> {param_name} = {val_expr}.get<vector<vector<int>>>();'
