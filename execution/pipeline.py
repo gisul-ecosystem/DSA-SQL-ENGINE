@@ -34,6 +34,42 @@ _LANG_CONFIG = {
 }
 
 
+def _outputs_match(actual: object, expected: object) -> bool:
+    """Compare actual vs expected output with type coercion for common edge cases.
+
+    Strict equality is tried first. If that fails we apply two relaxations:
+
+    1. Numeric string / number equivalence: a function that returns the string
+       "-1" should match expected_output: -1 (and vice-versa).  This avoids
+       penalising users for the return type of string-returning functions when
+       the value happens to be numeric.
+
+    2. List-of-one vs scalar: some languages (e.g. Go wrappers) wrap a single
+       return value in a list; [42] should equal 42.
+    """
+    if actual == expected:
+        return True
+
+    # Numeric string <-> number
+    try:
+        if str(actual) == str(expected):
+            return True
+        if float(str(actual)) == float(str(expected)):
+            return True
+    except (ValueError, TypeError):
+        pass
+
+    # [value] vs value
+    if isinstance(actual, list) and len(actual) == 1:
+        if _outputs_match(actual[0], expected):
+            return True
+    if isinstance(expected, list) and len(expected) == 1:
+        if _outputs_match(actual, expected[0]):
+            return True
+
+    return False
+
+
 class ExecutionPipeline:
 
     def __init__(self, request: dict):
@@ -175,7 +211,7 @@ class ExecutionPipeline:
                         })
 
                     for index, (result, tc) in enumerate(zip(actual_outputs, self.request["test_cases"])):
-                        if result != tc["expected_output"]:
+                        if not _outputs_match(result, tc["expected_output"]):
                             return finish({
                                 "verdict": "wrong_answer",
                                 "failed_test_case_index": index,
@@ -204,7 +240,7 @@ class ExecutionPipeline:
                                 "error_message": str(exc),
                             })
 
-                        if result != tc["expected_output"]:
+                        if not _outputs_match(result, tc["expected_output"]):
                             return finish({
                                 "verdict": "wrong_answer",
                                 "failed_test_case_index": index,

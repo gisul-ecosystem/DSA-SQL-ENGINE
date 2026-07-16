@@ -32,6 +32,22 @@ PIPE = asyncio.subprocess.PIPE
 DEVNULL = asyncio.subprocess.DEVNULL
 
 
+def _strip_csharp_preamble(code: str) -> str:
+    """Remove using directives and namespace declarations from user-submitted C# code.
+
+    The wrapper already contains all necessary using directives at the top.
+    If user code includes its own using/namespace statements and gets injected
+    mid-file, the compiler rejects them as invalid at that position.
+    """
+    import re
+    lines = code.splitlines()
+    filtered = [
+        line for line in lines
+        if not re.match(r"^\s*(using\s+[\w.]+\s*;|namespace\s+)", line)
+    ]
+    return "\n".join(filtered)
+
+
 class CSharpExecutor(BaseExecutor):
     IMAGE_NAME = "csharp-sandbox:latest"
 
@@ -88,7 +104,11 @@ class CSharpExecutor(BaseExecutor):
         await mkdir_proc.wait()
 
         program_path = os.path.join(self.project_path, "Program.cs")
-        wrapped_code = CSHARP_WRAPPER_TEMPLATE.replace("{source_code}", self.code)
+        # Strip using/namespace declarations from user code — the wrapper
+        # already has them at the top and C# forbids using directives after
+        # type declarations.
+        cleaned_code = _strip_csharp_preamble(self.code)
+        wrapped_code = CSHARP_WRAPPER_TEMPLATE.replace("{source_code}", cleaned_code)
         with open(program_path, "w") as f:
             f.write(wrapped_code)
 
@@ -119,7 +139,9 @@ class CSharpExecutor(BaseExecutor):
                 raise CompileError("Compilation timed out")
 
         if proc.returncode != 0:
-            raise CompileError(stderr.decode().strip() or "Compilation failed")
+            # dotnet build writes errors to stdout, not stderr
+            error_output = stdout.decode().strip() or stderr.decode().strip() or "Compilation failed"
+            raise CompileError(error_output)
 
     async def run(self, test_input: dict):
         if not self.container_id:

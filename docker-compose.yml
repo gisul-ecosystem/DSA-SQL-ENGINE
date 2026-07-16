@@ -19,7 +19,7 @@ services:
     image: gisuldocker/execution-engine-py:latest
     restart: always
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8900}:8000"
     environment:
       - SERVICE_NAME=execution-engine-api
       - LOG_FORMAT=${LOG_FORMAT:-json}

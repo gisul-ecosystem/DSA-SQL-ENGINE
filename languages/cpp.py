@@ -155,39 +155,49 @@ class CppExecutor(BaseExecutor):
         param_deserialization = []
         param_names = []
 
-        for param_type, param_name in params:
+        for idx, (param_type, param_name) in enumerate(params):
             clean_type = param_type.replace("const", "").replace("&", "").strip()
             clean_type = re.sub(r"\s*\*\s*", "*", clean_type)
 
+            # Use positional access so the JSON key name in test_cases.input
+            # doesn't need to match the C++ function parameter name — consistent
+            # with how Python/JS/Java wrappers dispatch by argument position.
+            # Store a const json& reference for clean repeated access.
+            ref_var = f"_arg{idx}"
+            param_deserialization.append(
+                f'const json& {ref_var} = std::next(j.items().begin(), {idx}).value();'
+            )
+            val_expr = ref_var
+
             if clean_type == "int":
-                param_deserialization.append(f'int {param_name} = j["{param_name}"];')
+                param_deserialization.append(f'int {param_name} = {val_expr}.get<int>();')
             elif clean_type == "long long":
-                param_deserialization.append(f'long long {param_name} = j["{param_name}"];')
+                param_deserialization.append(f'long long {param_name} = {val_expr}.get<long long>();')
             elif clean_type == "string":
-                param_deserialization.append(f'string {param_name} = j["{param_name}"];')
+                param_deserialization.append(f'string {param_name} = {val_expr}.get<string>();')
             elif clean_type == "int*":
                 param_deserialization.append(
-                    f'vector<int> {param_name}_vec = j["{param_name}"].get<vector<int>>();'
+                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
                 )
                 param_deserialization.append(f'int* {param_name} = {param_name}_vec.data();')
             elif clean_type == "vector<int>":
                 param_deserialization.append(
-                    f'vector<int> {param_name} = j["{param_name}"].get<vector<int>>();'
+                    f'vector<int> {param_name} = {val_expr}.get<vector<int>>();'
                 )
             elif clean_type == "vector<vector<int>>":
                 param_deserialization.append(
-                    f'vector<vector<int>> {param_name} = j["{param_name}"].get<vector<vector<int>>>();'
+                    f'vector<vector<int>> {param_name} = {val_expr}.get<vector<vector<int>>>();'
                 )
             elif clean_type == "ListNode*":
                 param_deserialization.append(
-                    f'vector<int> {param_name}_vec = j["{param_name}"].get<vector<int>>();'
+                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
                 )
                 param_deserialization.append(
                     f'ListNode* {param_name} = buildLinkedList({param_name}_vec);'
                 )
             elif clean_type == "TreeNode*":
                 param_deserialization.append(f'vector<optional<int>> {param_name}_vec;')
-                param_deserialization.append(f'for (auto& el : j["{param_name}"]) {{')
+                param_deserialization.append(f'for (auto& el : {val_expr}) {{')
                 param_deserialization.append(f'    if (el.is_null()) {param_name}_vec.push_back(nullopt);')
                 param_deserialization.append(f'    else {param_name}_vec.push_back(el.get<int>());')
                 param_deserialization.append('}')

@@ -190,19 +190,30 @@ class CExecutor(BaseExecutor):
         param_names = []
         first_input_array_size: str | None = None
 
-        for param_type, param_name in params:
+        for idx, (param_type, param_name) in enumerate(params):
             clean_type = param_type.replace("const", "").strip()
             clean_type = re.sub(r"\s+", "", clean_type)
 
+            # Use positional access: pick the i-th value from the input object.
+            # This matches how Python/JS/Java wrappers dispatch — by argument
+            # position, not by JSON key name — so param names in the user's
+            # function signature don't have to match the test-case input keys.
+            # We store a const json& reference to avoid repeating the iterator expr.
+            ref_var = f"_arg{idx}"
+            param_deserialization.append(
+                f'const json& {ref_var} = std::next(j.items().begin(), {idx}).value();'
+            )
+            val_expr = ref_var
+
             if clean_type == "int":
-                param_deserialization.append(f'int {param_name} = j["{param_name}"];')
+                param_deserialization.append(f'int {param_name} = {val_expr}.get<int>();')
             elif clean_type == "long":
-                param_deserialization.append(f'long {param_name} = j["{param_name}"];')
+                param_deserialization.append(f'long {param_name} = {val_expr}.get<long>();')
             elif clean_type == "double":
-                param_deserialization.append(f'double {param_name} = j["{param_name}"];')
+                param_deserialization.append(f'double {param_name} = {val_expr}.get<double>();')
             elif clean_type in ("int[]", "int*"):
                 param_deserialization.append(
-                    f'vector<int> {param_name}_vec = j["{param_name}"].get<vector<int>>();'
+                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
                 )
                 param_deserialization.append(f'int* {param_name} = {param_name}_vec.data();')
                 if first_input_array_size is None:
@@ -210,7 +221,7 @@ class CExecutor(BaseExecutor):
             elif re.fullmatch(r"int\[\d+\]", clean_type):
                 dim = re.findall(r"\d+", clean_type)[0]
                 param_deserialization.append(
-                    f'vector<int> {param_name}_vec = j["{param_name}"].get<vector<int>>();'
+                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
                 )
                 param_deserialization.append(f'int {param_name}[{dim}] = {{0}};')
                 param_deserialization.append(
@@ -221,7 +232,7 @@ class CExecutor(BaseExecutor):
             elif re.fullmatch(r"int\[\d+\]\[\d+\]", clean_type):
                 rows, cols = re.findall(r"\d+", clean_type)
                 param_deserialization.append(
-                    f'vector<vector<int>> {param_name}_vec = j["{param_name}"].get<vector<vector<int>>>();'
+                    f'vector<vector<int>> {param_name}_vec = {val_expr}.get<vector<vector<int>>>();'
                 )
                 param_deserialization.append(f'int {param_name}[{rows}][{cols}] = {{0}};')
                 param_deserialization.append(
@@ -236,7 +247,7 @@ class CExecutor(BaseExecutor):
                 param_deserialization.append('    }')
                 param_deserialization.append('}')
             elif clean_type == "char*":
-                param_deserialization.append(f'string {param_name}_tmp = j["{param_name}"];')
+                param_deserialization.append(f'string {param_name}_tmp = {val_expr}.get<string>();')
                 param_deserialization.append(f'char* {param_name} = (char*){param_name}_tmp.c_str();')
             else:
                 raise CompileError(f"Unsupported C type: {clean_type}")
@@ -245,14 +256,12 @@ class CExecutor(BaseExecutor):
 
         output_param_already_initialized = False
         if output_param:
-            output_clean_type = re.sub(r"\s+", "", output_param[0].replace("const", "").strip())
-            output_param_already_initialized = output_clean_type in {
-                re.sub(r"\s+", "", pt.replace("const", "").strip()) for pt, pn in params if pn == output_param[1]
-            } and any(
-                output_param[1] in line and (
-                    f'{output_param[1]}_vec = j["{output_param[1]}"]' in line
-                    or f'{output_param[1]}_tmp = j["{output_param[1]}"]' in line
-                )
+            # Check if the output param was already deserialized as an input param
+            # (i.e., it appears in the param list by name)
+            output_param_already_initialized = any(
+                pn == output_param[1] for _, pn in params
+            ) and any(
+                f'{output_param[1]}_vec' in line
                 for line in param_deserialization
             )
 

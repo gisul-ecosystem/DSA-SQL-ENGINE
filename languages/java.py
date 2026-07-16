@@ -32,6 +32,28 @@ PIPE = asyncio.subprocess.PIPE
 DEVNULL = asyncio.subprocess.DEVNULL
 
 
+def _strip_java_preamble(code: str) -> str:
+    """Remove import/package declarations and fix class visibility from user-submitted Java code.
+
+    The wrapper (Main.java) already imports everything needed.
+    - import/package statements cannot appear after class declarations.
+    - 'public class Solution' is invalid in Main.java — only one public
+      top-level class is allowed per file and it must match the filename.
+      We demote it to package-private so javac accepts it.
+    """
+    import re
+    lines = code.splitlines()
+    filtered = []
+    for line in lines:
+        # Drop import / package lines
+        if re.match(r"^\s*(import|package)\s+", line):
+            continue
+        # Demote 'public class Solution' -> 'class Solution'
+        line = re.sub(r"\bpublic\s+(class\s+Solution\b)", r"\1", line)
+        filtered.append(line)
+    return "\n".join(filtered)
+
+
 class JavaBatchRuntimeError(RuntimeExecutionError):
     def __init__(self, message: str, failed_test_case_index: int | None = None):
         super().__init__(message)
@@ -84,7 +106,11 @@ class JavaExecutor(BaseExecutor):
             self.container_id = stdout.decode().strip()
 
         self.file_path = os.path.join(self.temp_dir, "Main.java")
-        wrapped_code = JAVA_WRAPPER_TEMPLATE.replace("{source_code}", self.code)
+        # Strip any import/package statements from user code — the wrapper
+        # already imports everything needed, and Java forbids imports after
+        # class/type declarations.
+        cleaned_code = _strip_java_preamble(self.code)
+        wrapped_code = JAVA_WRAPPER_TEMPLATE.replace("{source_code}", cleaned_code)
         with open(self.file_path, "w") as f:
             f.write(wrapped_code)
 
