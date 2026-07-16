@@ -33,13 +33,21 @@ DEVNULL = asyncio.subprocess.DEVNULL
 
 
 def _strip_java_preamble(code: str) -> str:
-    """Remove import/package declarations and fix class visibility from user-submitted Java code.
+    """Normalise user-submitted Java code for injection into the wrapper (Main.java).
 
-    The wrapper (Main.java) already imports everything needed.
-    - import/package statements cannot appear after class declarations.
-    - 'public class Solution' is invalid in Main.java — only one public
-      top-level class is allowed per file and it must match the filename.
-      We demote it to package-private so javac accepts it.
+    Three transformations applied in order:
+
+    1. Drop import / package declarations — the wrapper already has all needed
+       imports and they cannot appear after class declarations in the same file.
+
+    2. Demote 'public class Solution' → 'class Solution' — only one public
+       top-level class is allowed per file and it must match the filename
+       (Main.java).
+
+    3. Wrap bare methods — if the code has no class declaration at all (user
+       submitted just a method body) wrap it in 'class Solution { ... }' so
+       javac doesn't treat it as an unnamed class (preview feature, disabled
+       by default on JDK 21).
     """
     import re
     lines = code.splitlines()
@@ -51,8 +59,14 @@ def _strip_java_preamble(code: str) -> str:
         # Demote 'public class Solution' -> 'class Solution'
         line = re.sub(r"\bpublic\s+(class\s+Solution\b)", r"\1", line)
         filtered.append(line)
-    return "\n".join(filtered)
 
+    result = "\n".join(filtered)
+
+    # If there is no class declaration, wrap the whole thing in Solution{}
+    if not re.search(r"\bclass\s+\w+", result):
+        result = "class Solution {\n" + result + "\n}"
+
+    return result
 
 class JavaBatchRuntimeError(RuntimeExecutionError):
     def __init__(self, message: str, failed_test_case_index: int | None = None):

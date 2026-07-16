@@ -179,7 +179,20 @@ class CExecutor(BaseExecutor):
     def _generate_wrapper(self):
         return_type, params = self._parse_signature()
         is_void = return_type == "void"
+        is_ptr_return = return_type in ("int*", "int[]")
 
+        # --- Detect LeetCode-style returnSize output param ---
+        # Pattern: int* f(int* arr, int n, int* returnSize)
+        # returnSize is an output-only param (int*) whose name contains "size".
+        # It must NOT be deserialized from JSON input.
+        return_size_name: str | None = None
+        if is_ptr_return:
+            for pt, pn in params:
+                clean = re.sub(r"\s+", "", pt.replace("const", "").strip())
+                if clean == "int*" and re.search(r"size", pn, re.IGNORECASE):
+                    return_size_name = pn
+
+        # --- Detect void output param ---
         output_param = None
         if is_void:
             array_params = [(pt, pn) for pt, pn in params if pt in ("int[]", "int*")]
@@ -194,14 +207,25 @@ class CExecutor(BaseExecutor):
             clean_type = param_type.replace("const", "").strip()
             clean_type = re.sub(r"\s+", "", clean_type)
 
+            # returnSize is output-only — skip JSON deserialization, declare later
+            if param_name == return_size_name:
+                param_names.append(param_name)
+                continue
+
             # Use positional access: pick the i-th value from the input object.
             # This matches how Python/JS/Java wrappers dispatch — by argument
             # position, not by JSON key name — so param names in the user's
             # function signature don't have to match the test-case input keys.
             # We store a const json& reference to avoid repeating the iterator expr.
-            ref_var = f"_arg{idx}"
+            # NOTE: we use the number of JSON keys seen so far (not idx) because
+            # returnSize is not in the JSON input at all.
+            json_idx = sum(
+                1 for i, (_, pn) in enumerate(params[:idx])
+                if pn != return_size_name
+            )
+            ref_var = f"_arg{json_idx}"
             param_deserialization.append(
-                f'const json& {ref_var} = std::next(j.items().begin(), {idx}).value();'
+                f'const json& {ref_var} = std::next(j.items().begin(), {json_idx}).value();'
             )
             val_expr = ref_var
 
@@ -254,10 +278,13 @@ class CExecutor(BaseExecutor):
 
             param_names.append(param_name)
 
+        # Declare returnSize as a local int (written to by the function)
+        if return_size_name:
+            param_deserialization.append(f'int {return_size_name}_val = 0;')
+            param_deserialization.append(f'int* {return_size_name} = &{return_size_name}_val;')
+
         output_param_already_initialized = False
         if output_param:
-            # Check if the output param was already deserialized as an input param
-            # (i.e., it appears in the param list by name)
             output_param_already_initialized = any(
                 pn == output_param[1] for _, pn in params
             ) and any(
@@ -278,10 +305,20 @@ class CExecutor(BaseExecutor):
                 return_serialization = f'output = json({out_name}_vec);'
             else:
                 return_serialization = "output = nullptr;"
+        elif is_ptr_return:
+            function_call = f'auto result = {self.function_name}({", ".join(param_names)});'
+            if return_size_name:
+                return_serialization = (
+                    f'output = json(vector<int>(result, result + {return_size_name}_val));'
+                )
+            else:
+                size_expr = first_input_array_size or "0"
+                return_serialization = (
+                    f'output = json(vector<int>(result, result + {size_expr}));'
+                )
         else:
             function_call = f'auto result = {self.function_name}({", ".join(param_names)});'
             return_serialization = "output = result;"
-
         def decl_param(param_type: str, param_name: str) -> str:
             normalized = param_type if param_type != "int[]" else "int*"
             array_match = re.fullmatch(r"(.+?)(\[[^\]]+\](?:\[[^\]]+\])*)", normalized.replace(" ", ""))

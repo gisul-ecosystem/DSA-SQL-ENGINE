@@ -17,8 +17,8 @@ int main() {
         ios::sync_with_stdio(false);
         cin.tie(nullptr);
 
-        string input;
-        if (!getline(cin, input)) {
+        string _stdin_raw;
+        if (!getline(cin, _stdin_raw)) {
             cout << "{\"error\":\"No input received\"}";
             return 1;
         }
@@ -26,7 +26,7 @@ int main() {
         json j;
 
         try {
-            j = json::parse(input);
+            j = json::parse(_stdin_raw);
         } catch (...) {
             cout << "{\"error\":\"Invalid JSON input\"}";
             return 1;
