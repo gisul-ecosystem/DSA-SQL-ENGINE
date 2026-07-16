@@ -1,6 +1,7 @@
 C_WRAPPER_TEMPLATE = r"""
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>

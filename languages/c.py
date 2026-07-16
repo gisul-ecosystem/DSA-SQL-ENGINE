@@ -192,6 +192,23 @@ class CExecutor(BaseExecutor):
                 if clean == "int*" and re.search(r"size", pn, re.IGNORECASE):
                     return_size_name = pn
 
+        # --- Detect LeetCode-style array-size companion params ---
+        # Pattern: f(char** ops, int opsSize) or f(int* arr, int arrSize)
+        # A plain int param whose name ends with "Size" (case-insensitive) and
+        # follows an array param is auto-filled from the array length — not read
+        # from JSON input (the test case input only has the array itself).
+        array_size_params: set[str] = set()
+        prev_was_array = False
+        for pt, pn in params:
+            clean = re.sub(r"\s+", "", pt.replace("const", "").strip())
+            if clean in ("int*", "int[]", "char**", "char*"):
+                prev_was_array = True
+            elif clean == "int" and prev_was_array and re.search(r"size", pn, re.IGNORECASE):
+                array_size_params.add(pn)
+                prev_was_array = False
+            else:
+                prev_was_array = False
+
         # --- Detect void output param ---
         output_param = None
         if is_void:
@@ -212,6 +229,11 @@ class CExecutor(BaseExecutor):
                 param_names.append(param_name)
                 continue
 
+            # array-size companion (e.g. operationsSize) — auto-fill from array, skip JSON
+            if param_name in array_size_params:
+                param_names.append(param_name)
+                continue
+
             # Use positional access: pick the i-th value from the input object.
             # This matches how Python/JS/Java wrappers dispatch — by argument
             # position, not by JSON key name — so param names in the user's
@@ -221,7 +243,7 @@ class CExecutor(BaseExecutor):
             # returnSize is not in the JSON input at all.
             json_idx = sum(
                 1 for i, (_, pn) in enumerate(params[:idx])
-                if pn != return_size_name
+                if pn != return_size_name and pn not in array_size_params
             )
             ref_var = f"_arg{json_idx}"
             param_deserialization.append(
@@ -273,6 +295,32 @@ class CExecutor(BaseExecutor):
             elif clean_type == "char*":
                 param_deserialization.append(f'string {param_name}_tmp = {val_expr}.get<string>();')
                 param_deserialization.append(f'char* {param_name} = (char*){param_name}_tmp.c_str();')
+            elif clean_type == "char**":
+                # Array of C strings — deserialize from JSON array of strings.
+                # Also accept a multiline string input and split it into lines
+                # (same format as vector<string>).
+                param_deserialization.append(f'vector<string> {param_name}_strvec;')
+                param_deserialization.append(f'if ({val_expr}.is_array()) {{')
+                param_deserialization.append(f'    {param_name}_strvec = {val_expr}.get<vector<string>>();')
+                param_deserialization.append(f'}} else {{')
+                param_deserialization.append(f'    string _raw_{param_name} = {val_expr}.get<string>();')
+                param_deserialization.append(f'    istringstream _iss_{param_name}(_raw_{param_name});')
+                param_deserialization.append(f'    string _ln_{param_name};')
+                param_deserialization.append(f'    bool _first_{param_name} = true;')
+                param_deserialization.append(f'    while (getline(_iss_{param_name}, _ln_{param_name})) {{')
+                param_deserialization.append(f'        if (!_ln_{param_name}.empty() && _ln_{param_name}.back() == \'\\r\') _ln_{param_name}.pop_back();')
+                param_deserialization.append(f'        if (_ln_{param_name}.empty()) continue;')
+                param_deserialization.append(f'        if (_first_{param_name}) {{ _first_{param_name} = false;')
+                param_deserialization.append(f'            bool _isc = true; for (char _c : _ln_{param_name}) if (!isdigit(_c)) {{ _isc = false; break; }}')
+                param_deserialization.append(f'            if (_isc) continue; }}')
+                param_deserialization.append(f'        {param_name}_strvec.push_back(_ln_{param_name});')
+                param_deserialization.append(f'    }}')
+                param_deserialization.append(f'}}')
+                param_deserialization.append(f'vector<char*> {param_name}_ptrvec;')
+                param_deserialization.append(f'for (auto& s : {param_name}_strvec) {param_name}_ptrvec.push_back(&s[0]);')
+                param_deserialization.append(f'char** {param_name} = {param_name}_ptrvec.data();')
+                if first_input_array_size is None:
+                    first_input_array_size = f"{param_name}_strvec.size()"
             else:
                 raise CompileError(f"Unsupported C type: {clean_type}")
 
@@ -282,6 +330,11 @@ class CExecutor(BaseExecutor):
         if return_size_name:
             param_deserialization.append(f'int {return_size_name}_val = 0;')
             param_deserialization.append(f'int* {return_size_name} = &{return_size_name}_val;')
+
+        # Declare array-size companion params (e.g. operationsSize) from array length
+        for sp in array_size_params:
+            size_expr = first_input_array_size or "0"
+            param_deserialization.append(f'int {sp} = (int)({size_expr});')
 
         output_param_already_initialized = False
         if output_param:
