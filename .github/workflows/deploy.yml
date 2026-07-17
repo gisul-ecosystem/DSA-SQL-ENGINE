@@ -49,11 +49,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker create --name _deploy_extract "$IMAGE"
-          docker cp _deploy_extract:/app/docker-compose.yml  ./docker-compose.yml
-          docker cp _deploy_extract:/app/docker              ./docker
-          docker cp _deploy_extract:/app/observability       ./observability
-          docker rm _deploy_extract
+          docker create --name deploy-extract "$IMAGE"
+          docker cp deploy-extract:/app/docker-compose.yml  ./docker-compose.yml
+          docker cp deploy-extract:/app/docker              ./docker
+          docker cp deploy-extract:/app/observability       ./observability
+          docker rm deploy-extract
 
       - name: Detect changed sandbox image inputs
         id: sandbox_changes
