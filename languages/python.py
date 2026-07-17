@@ -88,7 +88,7 @@ class PythonExecutor(BaseExecutor):
 
         self.file_path = os.path.join(self.temp_dir, "main.py")
         wrapped_code = PYTHON_WRAPPER_TEMPLATE.replace("{source_code}", self.code)
-        with open(self.file_path, "w") as f:
+        with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(wrapped_code)
 
     async def run(self, test_input: dict):

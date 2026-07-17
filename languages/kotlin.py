@@ -80,7 +80,7 @@ class KotlinExecutor(BaseExecutor):
 
         self.file_path = os.path.join(self.temp_dir, "Main.kt")
         wrapped_code = KOTLIN_WRAPPER_TEMPLATE.replace("{source_code}", self.code)
-        with open(self.file_path, "w") as f:
+        with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(wrapped_code)
 
         compile_cmd = [

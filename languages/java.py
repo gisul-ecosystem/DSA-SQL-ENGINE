@@ -125,7 +125,7 @@ class JavaExecutor(BaseExecutor):
         # class/type declarations.
         cleaned_code = _strip_java_preamble(self.code)
         wrapped_code = JAVA_WRAPPER_TEMPLATE.replace("{source_code}", cleaned_code)
-        with open(self.file_path, "w") as f:
+        with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(wrapped_code)
 
         compile_cmd = [

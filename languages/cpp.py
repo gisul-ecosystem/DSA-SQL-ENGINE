@@ -91,7 +91,7 @@ class CppExecutor(BaseExecutor):
             raise CompileError("Wrapper placeholder replacement failed")
 
         self.file_path = os.path.join(self.temp_dir, "solution.cpp")
-        with open(self.file_path, "w") as f:
+        with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(wrapped_code)
 
         compile_cmd = [
