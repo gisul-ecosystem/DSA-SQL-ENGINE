@@ -27,9 +27,10 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: engines
+    runs-on: ubuntu-latest
     env:
       IMAGE: gisuldocker/execution-engine-py:latest
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       SANDBOX_HOST_PATH: ${{ secrets.SANDBOX_HOST_PATH }}
       WORKER_SCALE: ${{ vars.WORKER_SCALE || '2' }}
       WORKER_CONCURRENCY: ${{ vars.WORKER_CONCURRENCY || '8' }}
@@ -37,173 +38,118 @@ jobs:
       COMPILE_CONCURRENCY: ${{ vars.COMPILE_CONCURRENCY || '3' }}
       WARM_CONTAINER_TTL_SECONDS: ${{ vars.WARM_CONTAINER_TTL_SECONDS || '300' }}
     steps:
-      - name: Login to Docker Hub
-        shell: bash
-        run: |
-          # Force IPv4 by adding a hosts entry — runner has no IPv6 route to Docker Hub
-          DOCKER_HUB_IPV4=$(getent ahostsv4 registry-1.docker.io | awk 'NR==1{print $1}')
-          if [ -n "$DOCKER_HUB_IPV4" ]; then
-            echo "$DOCKER_HUB_IPV4 registry-1.docker.io" | sudo tee -a /etc/hosts > /dev/null
-          fi
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+      - uses: actions/checkout@v4
 
-      - name: Pull latest image
-        shell: bash
-        run: docker pull "$IMAGE"
+      - name: Upload deploy bundle to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "docker-compose.yml,docker,observability"
+          target: ${{ secrets.DEPLOY_PATH }}
+          overwrite: true
+          strip_components: 0
 
-      - name: Extract files from image
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker create --name deploy-extract "$IMAGE"
-          docker cp deploy-extract:/app/docker-compose.yml  ./docker-compose.yml
-          docker cp deploy-extract:/app/docker              ./docker
-          docker cp deploy-extract:/app/observability       ./observability
-          docker rm deploy-extract
+      - name: Deploy stack over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          SANDBOX_HOST_PATH: ${{ env.SANDBOX_HOST_PATH }}
+          WORKER_SCALE: ${{ env.WORKER_SCALE }}
+          WORKER_CONCURRENCY: ${{ env.WORKER_CONCURRENCY }}
+          DOCKER_RUN_CONCURRENCY: ${{ env.DOCKER_RUN_CONCURRENCY }}
+          COMPILE_CONCURRENCY: ${{ env.COMPILE_CONCURRENCY }}
+          WARM_CONTAINER_TTL_SECONDS: ${{ env.WARM_CONTAINER_TTL_SECONDS }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: IMAGE,DEPLOY_PATH,SANDBOX_HOST_PATH,WORKER_SCALE,WORKER_CONCURRENCY,DOCKER_RUN_CONCURRENCY,COMPILE_CONCURRENCY,WARM_CONTAINER_TTL_SECONDS,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          script_stop: true
+          script: |
+            set -euo pipefail
+            : "${DEPLOY_PATH:?Set GitHub secret DEPLOY_PATH to the remote deploy directory}"
+            : "${SANDBOX_HOST_PATH:?Set GitHub secret SANDBOX_HOST_PATH to a Linux path such as /home/<user>/judge-sandbox}"
 
-      - name: Detect changed sandbox image inputs
-        id: sandbox_changes
-        shell: bash
-        run: |
-          set -euo pipefail
+            case "${SANDBOX_HOST_PATH}" in
+              /run/desktop/mnt/host/*)
+                echo "SANDBOX_HOST_PATH is set to a Windows-host mount: ${SANDBOX_HOST_PATH}" >&2
+                echo "Use a native WSL/Linux path instead, e.g. /home/<user>/judge-sandbox" >&2
+                exit 1
+                ;;
+            esac
 
-          CHECKSUM_FILE="${HOME}/.sandbox_checksums"
-          touch "$CHECKSUM_FILE"
+            mkdir -p "${DEPLOY_PATH}"
+            cd "${DEPLOY_PATH}"
 
-          python=0; js=0; java=0; kotlin=1; cpp=0; go=0; rust=0; csharp=0
+            echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+            docker pull "${IMAGE}"
 
-          check() {
-            local flag_name="$1"; local file="$2"
-            if [ ! -f "$file" ]; then return; fi
-            local new_sum; new_sum=$(sha256sum "$file" | awk '{print $1}')
-            local old_sum; old_sum=$(grep "^${file}=" "$CHECKSUM_FILE" 2>/dev/null | cut -d= -f2 || true)
-            if [ "$new_sum" != "$old_sum" ]; then
-              eval "${flag_name}=1"
-            fi
-          }
+            CHECKSUM_FILE="${HOME}/.sandbox_checksums"
+            touch "${CHECKSUM_FILE}"
 
-          check python  docker/python.Dockerfile
-          check js      docker/js.Dockerfile
-          check java    docker/java.Dockerfile
-          check cpp     docker/cpp.Dockerfile
-          check cpp     docker/cpp_support.hpp
-          check go      docker/go.Dockerfile
-          check rust    docker/rust.Dockerfile
-          check csharp  docker/csharp.Dockerfile
+            python=0; js=0; java=0; kotlin=1; cpp=0; go=0; rust=0; csharp=0
 
-          any=0
-          for flag in "$python" "$js" "$java" "$kotlin" "$cpp" "$go" "$rust" "$csharp"; do
-            if [[ "$flag" == "1" ]]; then any=1; break; fi
-          done
+            check() {
+              local flag_name="$1"; local file="$2"
+              if [ ! -f "$file" ]; then return; fi
+              local new_sum; new_sum=$(sha256sum "$file" | awk '{print $1}')
+              local old_sum; old_sum=$(grep "^${file}=" "$CHECKSUM_FILE" 2>/dev/null | cut -d= -f2 || true)
+              if [ "$new_sum" != "$old_sum" ]; then
+                eval "${flag_name}=1"
+              fi
+            }
 
-          {
-            echo "any=${any}"
-            echo "python=${python}"
-            echo "js=${js}"
-            echo "java=${java}"
-            echo "kotlin=${kotlin}"
-            echo "cpp=${cpp}"
-            echo "go=${go}"
-            echo "rust=${rust}"
-            echo "csharp=${csharp}"
-          } >> "$GITHUB_OUTPUT"
+            check python  docker/python.Dockerfile
+            check js      docker/js.Dockerfile
+            check java    docker/java.Dockerfile
+            check cpp     docker/cpp.Dockerfile
+            check cpp     docker/cpp_support.hpp
+            check go      docker/go.Dockerfile
+            check rust    docker/rust.Dockerfile
+            check csharp  docker/csharp.Dockerfile
 
-      - name: Detect missing sandbox images
-        id: sandbox_images
-        shell: bash
-        run: |
-          set -euo pipefail
+            if ! docker image inspect python-sandbox:latest  >/dev/null 2>&1; then python=1;  fi
+            if ! docker image inspect js-sandbox:latest      >/dev/null 2>&1; then js=1;      fi
+            if ! docker image inspect java-sandbox:latest    >/dev/null 2>&1; then java=1;    fi
+            if ! docker image inspect kotlin-sandbox:latest  >/dev/null 2>&1; then kotlin=1;  fi
+            if ! docker image inspect cpp-sandbox:latest     >/dev/null 2>&1; then cpp=1;     fi
+            if ! docker image inspect go-sandbox:latest      >/dev/null 2>&1; then go=1;      fi
+            if ! docker image inspect rust-sandbox:latest    >/dev/null 2>&1; then rust=1;    fi
+            if ! docker image inspect csharp-sandbox:latest  >/dev/null 2>&1; then csharp=1;  fi
 
-          python=0; js=0; java=0; kotlin=0; cpp=0; go=0; rust=0; csharp=0
+            if [[ "${python}" == "1" ]]; then docker build -t python-sandbox:latest  -f docker/python.Dockerfile  .; fi
+            if [[ "${js}" == "1" ]];     then docker build -t js-sandbox:latest      -f docker/js.Dockerfile      .; fi
+            if [[ "${java}" == "1" ]];   then docker build -t java-sandbox:latest    -f docker/java.Dockerfile    .; fi
+            if [[ "${kotlin}" == "1" ]]; then docker build -t kotlin-sandbox:latest  -f docker/kotlin.Dockerfile  .; fi
+            if [[ "${cpp}" == "1" ]];    then docker build -t cpp-sandbox:latest     -f docker/cpp.Dockerfile     .; fi
+            if [[ "${go}" == "1" ]];     then docker build -t go-sandbox:latest      -f docker/go.Dockerfile      .; fi
+            if [[ "${rust}" == "1" ]];   then docker build -t rust-sandbox:latest    -f docker/rust.Dockerfile    .; fi
+            if [[ "${csharp}" == "1" ]]; then docker build -t csharp-sandbox:latest  -f docker/csharp.Dockerfile  .; fi
 
-          if ! docker image inspect python-sandbox:latest  >/dev/null 2>&1; then python=1;  fi
-          if ! docker image inspect js-sandbox:latest      >/dev/null 2>&1; then js=1;      fi
-          if ! docker image inspect java-sandbox:latest    >/dev/null 2>&1; then java=1;    fi
-          if ! docker image inspect kotlin-sandbox:latest  >/dev/null 2>&1; then kotlin=1;  fi
-          if ! docker image inspect cpp-sandbox:latest     >/dev/null 2>&1; then cpp=1;     fi
-          if ! docker image inspect go-sandbox:latest      >/dev/null 2>&1; then go=1;      fi
-          if ! docker image inspect rust-sandbox:latest    >/dev/null 2>&1; then rust=1;    fi
-          if ! docker image inspect csharp-sandbox:latest  >/dev/null 2>&1; then csharp=1;  fi
+            for f in docker/python.Dockerfile docker/js.Dockerfile docker/java.Dockerfile \
+                     docker/kotlin.Dockerfile docker/cpp.Dockerfile docker/cpp_support.hpp \
+                     docker/go.Dockerfile docker/rust.Dockerfile docker/csharp.Dockerfile; do
+              [ -f "$f" ] || continue
+              sed -i "/^${f}=/d" "${CHECKSUM_FILE}" 2>/dev/null || true
+              echo "${f}=$(sha256sum "$f" | awk '{print $1}')" >> "${CHECKSUM_FILE}"
+            done
 
-          any=0
-          for flag in "$python" "$js" "$java" "$kotlin" "$cpp" "$go" "$rust" "$csharp"; do
-            if [[ "$flag" == "1" ]]; then any=1; break; fi
-          done
+            docker image inspect python-sandbox:latest  >/dev/null
+            docker image inspect js-sandbox:latest      >/dev/null
+            docker image inspect java-sandbox:latest    >/dev/null
+            docker image inspect kotlin-sandbox:latest  >/dev/null
+            docker image inspect cpp-sandbox:latest     >/dev/null
+            docker image inspect go-sandbox:latest      >/dev/null
+            docker image inspect rust-sandbox:latest    >/dev/null
+            docker image inspect csharp-sandbox:latest  >/dev/null
 
-          {
-            echo "any=${any}"
-            echo "python=${python}"
-            echo "js=${js}"
-            echo "java=${java}"
-            echo "kotlin=${kotlin}"
-            echo "cpp=${cpp}"
-            echo "go=${go}"
-            echo "rust=${rust}"
-            echo "csharp=${csharp}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build changed or missing sandbox images
-        if: steps.sandbox_changes.outputs.any == '1' || steps.sandbox_images.outputs.any == '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ steps.sandbox_changes.outputs.python }}" == "1" || "${{ steps.sandbox_images.outputs.python }}" == "1" ]]; then docker build -t python-sandbox:latest  -f docker/python.Dockerfile  .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.js }}"     == "1" || "${{ steps.sandbox_images.outputs.js }}"     == "1" ]]; then docker build -t js-sandbox:latest      -f docker/js.Dockerfile      .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.java }}"   == "1" || "${{ steps.sandbox_images.outputs.java }}"   == "1" ]]; then docker build -t java-sandbox:latest    -f docker/java.Dockerfile    .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.kotlin }}" == "1" || "${{ steps.sandbox_images.outputs.kotlin }}" == "1" ]]; then docker build -t kotlin-sandbox:latest  -f docker/kotlin.Dockerfile  .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.cpp }}"    == "1" || "${{ steps.sandbox_images.outputs.cpp }}"    == "1" ]]; then docker build -t cpp-sandbox:latest     -f docker/cpp.Dockerfile     .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.go }}"     == "1" || "${{ steps.sandbox_images.outputs.go }}"     == "1" ]]; then docker build -t go-sandbox:latest      -f docker/go.Dockerfile      .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.rust }}"   == "1" || "${{ steps.sandbox_images.outputs.rust }}"   == "1" ]]; then docker build -t rust-sandbox:latest    -f docker/rust.Dockerfile    .; fi
-          if [[ "${{ steps.sandbox_changes.outputs.csharp }}" == "1" || "${{ steps.sandbox_images.outputs.csharp }}" == "1" ]]; then docker build -t csharp-sandbox:latest  -f docker/csharp.Dockerfile  .; fi
-
-      - name: Skip sandbox rebuild
-        if: steps.sandbox_changes.outputs.any != '1' && steps.sandbox_images.outputs.any != '1'
-        shell: bash
-        run: echo "No sandbox image changes or missing images detected"
-
-      - name: Save sandbox Dockerfile checksums
-        if: steps.sandbox_changes.outputs.any == '1' || steps.sandbox_images.outputs.any == '1'
-        shell: bash
-        run: |
-          CHECKSUM_FILE="${HOME}/.sandbox_checksums"
-          # Remove old entries for files we just rebuilt, then append fresh ones
-          for f in docker/python.Dockerfile docker/js.Dockerfile docker/java.Dockerfile \
-                   docker/kotlin.Dockerfile docker/cpp.Dockerfile docker/cpp_support.hpp \
-                   docker/go.Dockerfile docker/rust.Dockerfile docker/csharp.Dockerfile; do
-            [ -f "$f" ] || continue
-            sed -i "/^${f}=/d" "$CHECKSUM_FILE" 2>/dev/null || true
-            echo "${f}=$(sha256sum "$f" | awk '{print $1}')" >> "$CHECKSUM_FILE"
-          done
-
-      - name: Verify sandbox images exist
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker image inspect python-sandbox:latest  >/dev/null
-          docker image inspect js-sandbox:latest      >/dev/null
-          docker image inspect java-sandbox:latest    >/dev/null
-          docker image inspect kotlin-sandbox:latest  >/dev/null
-          docker image inspect cpp-sandbox:latest     >/dev/null
-          docker image inspect go-sandbox:latest      >/dev/null
-          docker image inspect rust-sandbox:latest    >/dev/null
-          docker image inspect csharp-sandbox:latest  >/dev/null
-
-      - name: Deploy stack via docker compose
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${SANDBOX_HOST_PATH:?Set GitHub secret SANDBOX_HOST_PATH to a WSL/Linux path such as /home/<user>/judge-sandbox}"
-
-          case "${SANDBOX_HOST_PATH}" in
-            /run/desktop/mnt/host/*)
-              echo "SANDBOX_HOST_PATH is set to a Windows-host mount: ${SANDBOX_HOST_PATH}" >&2
-              echo "Use a native WSL/Linux path instead, e.g. /home/<user>/judge-sandbox" >&2
-              exit 1
-              ;;
-          esac
-
-          export HOST_SANDBOX_ROOT="${SANDBOX_HOST_PATH}"
-
-          docker compose config >/dev/null
-          docker compose up -d --no-build --remove-orphans --scale worker="${WORKER_SCALE:-10}"
+            export HOST_SANDBOX_ROOT="${SANDBOX_HOST_PATH}"
+            docker compose config >/dev/null
+            docker compose up -d --no-build --remove-orphans --scale worker="${WORKER_SCALE:-10}"

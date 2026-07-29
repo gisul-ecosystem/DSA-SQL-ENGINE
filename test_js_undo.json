@@ -1,0 +1,10 @@
+{
+  "language": "javascript",
+  "source_code": "function trackUndoHistory(operations) {\n    const stack = [];\n    const result = [];\n    for (const op of operations) {\n        if (op === 'UNDO') {\n            if (stack.length > 0) stack.pop();\n        } else if (op === 'LAST') {\n            result.push(stack.length === 0 ? 'NONE' : stack[stack.length - 1]);\n        } else {\n            const parts = op.split(' ');\n            stack.push(parts[1]);\n        }\n    }\n    return result.join(' ');\n}",
+  "function_name": "trackUndoHistory",
+  "test_cases": [
+    { "input": { "operations": "9\nTYPE hello\nTYPE world\nLAST\nUNDO\nLAST\nTYPE again\nUNDO\nUNDO\nLAST" }, "expected_output": "world hello NONE" },
+    { "input": { "operations": "4\nUNDO\nLAST\nTYPE draft\nLAST" }, "expected_output": "NONE draft" },
+    { "input": { "operations": "5\nTYPE alpha\nTYPE beta\nUNDO\nUNDO\nLAST" }, "expected_output": "NONE" }
+  ]
+}

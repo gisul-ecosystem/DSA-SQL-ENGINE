@@ -330,6 +330,6 @@ curl -X POST http://localhost:8900/execute \
 
 `.github/workflows/deploy.yml`:
 
-- Builds and pushes `gisul/execution-engine-py:latest` on `main`
-- Deploys on a self-hosted runner
+- Builds and pushes `gisuldocker/execution-engine-py:latest` on `main`
+- Uploads the deploy bundle to the target server and runs deployment over SSH
 - Runs container with Docker socket + sandbox mount + `HOST_SANDBOX_ROOT`
