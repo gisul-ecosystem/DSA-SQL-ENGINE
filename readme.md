@@ -24,7 +24,7 @@ The service accepts user code + test cases, runs the code inside language-specif
 ## High-Level Architecture
 
 ```text
-Client
+Clientt
   -> FastAPI (/execute)
     -> ExecutionPipeline
       -> ExecutorFactory
