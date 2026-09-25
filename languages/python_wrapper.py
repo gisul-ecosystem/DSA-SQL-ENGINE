@@ -219,18 +219,13 @@ def auto_convert_output(result):
 
 
 def call_function(func, converted_input):
+    sig = inspect.signature(func)
+    param_count = len(sig.parameters)
 
-    try:
-        sig = inspect.signature(func)
-        param_count = len(sig.parameters)
+    if param_count == len(converted_input):
+        return func(*converted_input.values())
 
-        if param_count == len(converted_input):
-            return func(*converted_input.values())
-
-        return func(**converted_input)
-
-    except TypeError:
-        return func(**converted_input)
+    return func(**converted_input)
 
 
 def execute_function(function_name, test_input):
