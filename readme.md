@@ -154,8 +154,7 @@ Validation rules:
 {
   "verdict": "runtime_error",
   "failed_test_case_index": 0,
-  "error_message": "Execution timed out",
-  "actual_outputs": []
+  "error_message": "IndexError: list index out of range"
 }
 ```
 
@@ -164,14 +163,33 @@ Validation rules:
 ```json
 {
   "verdict": "compilation_error",
-  "error_message": "...compiler output...",
-  "actual_outputs": []
+  "error_message": "...compiler output..."
 }
 ```
 
-#### Timeout (Schema Note)
+JavaScript syntax errors (`node --check`) are reported here too.
 
-`TimeoutResponse` exists in `api/schemas.py`, but current pipeline/executors surface timeouts as `runtime_error` messages (for example `"Execution timed out"`).
+#### Timeout
+
+A test case ran longer than `EXECUTION_TIMEOUT_SECONDS`.
+
+```json
+{
+  "verdict": "timeout",
+  "failed_test_case_index": 0
+}
+```
+
+#### Error
+
+The sandbox could not be prepared (container start, Docker daemon, configuration). Not a problem with the submitted code.
+
+```json
+{
+  "verdict": "error",
+  "error_message": "Execution environment error: Failed to start execution container"
+}
+```
 
 ## Execution Limits and Isolation
 
@@ -302,13 +320,24 @@ If `HOST_SANDBOX_ROOT` is missing, empty, or a Windows drive path (`C:\...`), ex
 - Function dispatch:
   - Python/JS/TS can call top-level function or `Solution` class method
   - Java/Kotlin/C# expect `Solution` class method by name
+  - C++ accepts a `class Solution` method or a free function; Rust an `impl Solution` method or a free function
   - Go/C++/C/Rust parse and bind to `function_name` at compile/wrapper generation time
+- Arguments are bound by parameter name when the test-case keys match, otherwise by position (`pos` is skipped for linked-list problems).
+- Functions that return nothing (`void`, `None`, `Unit`, `()`) are judged on their mutated first argument, as LeetCode does for in-place problems such as `moveZeroes`. Callers that know the problem's return type should send `"in_place": true|false` in the `/execute` body; with `false`, a Python/JS solution that returns `None` is not judged on its (unchanged) input.
+- Anything the submission prints is ignored: wrappers print their result between `__JUDGE_RESULT_7f3a__` / `__JUDGE_END_7f3a__` markers (`execution/process.py`).
+- Python gets LeetCode's prelude (`typing`, `collections`, `heapq`, `bisect`, ...); C gets the standard headers and `struct ListNode` / `struct TreeNode`; C++ gets `<bits/stdc++.h>`.
+- C submissions are compiled as C with `gcc` and linked with a C++ JSON harness. LeetCode C conventions are supported: `numsSize`, `gridSize` / `gridColSize`, `returnSize`, `returnColumnSizes`.
+- Deep recursion runs on a 256 MB stack (512 MB for Python); runaway recursion is reported as a `runtime_error`.
 
 ## Operational Notes
 
-- Output comparison is strict (`output != expected_output`).
-- C executor currently compiles generated code with `g++` and uses a C++ JSON wrapper (`solution.cpp`).
+- Output comparison (`_outputs_match` in `execution/pipeline.py`): exact match first, then numeric strings equal numbers, `[x]` equals `x`, floats match within `1e-5`, and `null` equals `[]` (empty tree or list). Answers that may come back in any order are not supported.
+- Warm containers started from an image that a deploy has since rebuilt are discarded instead of reused.
 - `MAX_CONCURRENT_EXECUTIONS` exists in config but is not yet enforced in pipeline logic.
+
+## Pattern Tests
+
+`tests/run_patterns.py` runs about 30 LeetCode-style patterns (scalars, arrays, strings, chars, 2D grids, trees, linked lists with cycles, in-place functions, imports, debug prints, recursion, and every failure verdict) in all 10 languages through the real pipeline. It needs Redis, Docker and the sandbox images, the same as a worker; see the docstring for the `docker run` command.
 
 ## Sample cURL
 

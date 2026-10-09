@@ -206,6 +206,14 @@ public static class Builders {
 
 public class Program {
 
+    const string RESULT_START = "__JUDGE_RESULT_7f3a__";
+    const string RESULT_END = "__JUDGE_END_7f3a__";
+
+    static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions {
+        IncludeFields = true,
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
+    };
+
     static object AutoConvertOutput(object result) {
 
         if (result is TreeNode tree)
@@ -222,34 +230,23 @@ public class Program {
 
     static object ConvertValue(JsonElement element, Type targetType, Dictionary<string, JsonElement> fullInput) {
 
-        if (targetType == typeof(int))
-            return element.GetInt32();
+        if (element.ValueKind == JsonValueKind.Null)
+            return null;
 
-        if (targetType == typeof(long))
-            return element.GetInt64();
+        if (targetType == typeof(char))
+            return element.ValueKind == JsonValueKind.String
+                ? (element.GetString().Length > 0 ? element.GetString()[0] : '\0')
+                : (char) element.GetInt32();
 
-        if (targetType == typeof(double))
-            return element.GetDouble();
+        if (targetType == typeof(char[]) && element.ValueKind == JsonValueKind.String)
+            return element.GetString().ToCharArray();
 
-        if (targetType == typeof(bool))
-            return element.GetBoolean();
+        if (targetType == typeof(char[]))
+            return element.EnumerateArray().Select(x => (char) ConvertValue(x, typeof(char), fullInput)).ToArray();
 
-        if (targetType == typeof(string))
-            return element.GetString();
-
-        if (targetType == typeof(int[]))
-            return element.EnumerateArray().Select(x => x.GetInt32()).ToArray();
-
-        if (targetType == typeof(int[][]))
-            return element.EnumerateArray()
-                .Select(row => row.EnumerateArray().Select(x => x.GetInt32()).ToArray())
-                .ToArray();
-        
         if (targetType == typeof(char[][]))
             return element.EnumerateArray()
-                .Select(row => row.EnumerateArray()
-                .Select(x => x.GetString()[0])
-                .ToArray())
+                .Select(row => (char[]) ConvertValue(row, typeof(char[]), fullInput))
                 .ToArray();
 
         if (targetType == typeof(TreeNode))
@@ -277,10 +274,24 @@ public class Program {
                 .ToList()
             );
 
-        return null;
+        // Everything else (int, string, int[], string[], IList<IList<int>>,
+        // long[][], Dictionary<string,int>, ...) is handled by System.Text.Json.
+        return JsonSerializer.Deserialize(element.GetRawText(), targetType, JsonOptions);
     }
 
-    public static void Main(string[] args) {
+    static string Describe(Exception ex) {
+        while (ex is TargetInvocationException && ex.InnerException != null)
+            ex = ex.InnerException;
+        return ex.GetType().Name + ": " + ex.Message;
+    }
+
+    static void Emit(object obj) {
+        Console.Out.Flush();
+        Console.WriteLine(RESULT_START + JsonSerializer.Serialize(obj, JsonOptions) + RESULT_END);
+        Console.Out.Flush();
+    }
+
+    static void Run() {
 
         try {
 
@@ -293,40 +304,57 @@ public class Program {
             );
 
             Type solutionType = Type.GetType("Solution");
-            object instance = Activator.CreateInstance(solutionType);
+            if (solutionType == null)
+                throw new Exception("Class 'Solution' not found");
 
-            var method = solutionType.GetMethod(functionName);
+            // "pos" only describes a linked-list cycle; it is not an argument
+            // unless the method actually takes one more parameter.
+            var values = input.Where(kv => kv.Key != "pos").Select(kv => kv.Value).ToList();
+
+            var methods = solutionType
+                .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
+                .Where(m => m.Name == functionName)
+                .ToList();
+            if (methods.Count == 0)
+                throw new Exception("Function '" + functionName + "' not found");
+            var method = methods.FirstOrDefault(m => m.GetParameters().Length == values.Count) ?? methods[0];
+
             var parameters = method.GetParameters();
+            if (parameters.Length > values.Count)
+                values = input.Values.ToList();
 
             object[] argsConverted = new object[parameters.Length];
-            var values = input.Values.ToList();
-
             for (int i = 0; i < parameters.Length; i++) {
-                argsConverted[i] = ConvertValue(
-                    values[i],
-                    parameters[i].ParameterType,
-                    input
-                );
+                argsConverted[i] = i < values.Count
+                    ? ConvertValue(values[i], parameters[i].ParameterType, input)
+                    : null;
             }
 
+            object instance = method.IsStatic ? null : Activator.CreateInstance(solutionType);
             var result = method.Invoke(instance, argsConverted);
-            var output = AutoConvertOutput(result);
 
             var response = new Dictionary<string, object> {
-                { "result", output }
+                { "result", AutoConvertOutput(result) }
             };
+            if (method.ReturnType == typeof(void) && argsConverted.Length > 0)
+                response["mutated"] = AutoConvertOutput(argsConverted[0]);
 
-            Console.WriteLine(JsonSerializer.Serialize(response));
+            Emit(response);
         }
         catch (Exception ex) {
 
-            var error = new Dictionary<string, object> {
-                { "error", ex.InnerException?.Message ?? ex.Message }
-            };
-
-            Console.WriteLine(JsonSerializer.Serialize(error));
+            Emit(new Dictionary<string, object> {
+                { "error", Describe(ex) }
+            });
             Environment.Exit(1);
         }
+    }
+
+    public static void Main(string[] args) {
+        // Deep recursion (DFS on 10^5 nodes) needs a bigger stack than the default 1 MB.
+        var thread = new System.Threading.Thread(Run, 256 * 1024 * 1024);
+        thread.Start();
+        thread.Join();
     }
 }
 """

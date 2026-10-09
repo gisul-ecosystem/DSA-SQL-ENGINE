@@ -8,6 +8,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -23,13 +24,26 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
 )
 from .kotlin_wrapper import KOTLIN_WRAPPER_TEMPLATE
 
 PIPE = asyncio.subprocess.PIPE
 DEVNULL = asyncio.subprocess.DEVNULL
+
+
+def _split_kotlin_imports(code: str) -> tuple[str, str]:
+    """Kotlin only allows imports at the top of the file, before the wrapper's code."""
+    imports, body = [], []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("import "):
+            imports.append(stripped)
+        elif stripped.startswith("package "):
+            continue
+        else:
+            body.append(line)
+    return "\n".join(imports), "\n".join(body)
 
 
 class KotlinExecutor(BaseExecutor):
@@ -79,7 +93,12 @@ class KotlinExecutor(BaseExecutor):
             self.container_id = stdout.decode().strip()
 
         self.file_path = os.path.join(self.temp_dir, "Main.kt")
-        wrapped_code = KOTLIN_WRAPPER_TEMPLATE.replace("{source_code}", self.code)
+        user_imports, body = _split_kotlin_imports(self.code)
+        wrapped_code = (
+            KOTLIN_WRAPPER_TEMPLATE
+            .replace("{user_imports}", user_imports)
+            .replace("{source_code}", body)
+        )
         with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(wrapped_code)
 
@@ -111,35 +130,12 @@ class KotlinExecutor(BaseExecutor):
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
         exec_cmd = [
             "docker", "exec", "-i", self.container_id,
-            "java",
+            "java", "-Xms16m", "-Xmx256m", "-Xss256m",
+            "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1",
             "-cp", ".:/opt/kotlinc/lib/kotlin-stdlib.jar:/opt/libs/jackson-core.jar:/opt/libs/jackson-databind.jar:/opt/libs/jackson-annotations.jar",
             "Main",
         ]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                message = json.loads(stdout_str).get("error", "Runtime error")
-            except Exception:
-                message = stderr.decode() or "Runtime error"
-            raise RuntimeExecutionError(message)
-
-        try:
-            return json.loads(stdout_str)["result"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid output format")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):
         if self.container_id:

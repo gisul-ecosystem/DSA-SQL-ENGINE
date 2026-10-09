@@ -25,25 +25,21 @@ _RUN_KEY     = "docker_run_semaphore"
 _COMPILE_KEY = "compile_semaphore"
 _ACQUIRE_TIMEOUT = 120  # seconds
 
-_run_initialized     = False
-_compile_initialized = False
 
-
-def _make_semaphore(key: str, concurrency: int, initialized_flag_name: str):
+def _make_semaphore(key: str, concurrency: int):
     """Factory that returns a context-manager using a named Redis semaphore."""
 
     @asynccontextmanager
     async def _semaphore():
-        import sys
-        mod = sys.modules[__name__]
         r = get_redis()
 
-        if not getattr(mod, initialized_flag_name):
-            if await r.setnx(f"{key}:init", "1"):
-                await r.delete(key)
-                await r.rpush(key, *["t"] * concurrency)
-                log.info("%s: initialized with %d slots", key, concurrency)
-            setattr(mod, initialized_flag_name, True)
+        # Checked on every acquire, not once per process: Redis runs without
+        # persistence, so after a Redis restart the slots are gone and must be
+        # recreated, or every job would wait _ACQUIRE_TIMEOUT and fail.
+        if await r.setnx(f"{key}:init", "1"):
+            await r.delete(key)
+            await r.rpush(key, *["t"] * concurrency)
+            log.info("%s: initialized with %d slots", key, concurrency)
 
         started = time.perf_counter()
         result = await r.brpop(key, timeout=_ACQUIRE_TIMEOUT)
@@ -64,5 +60,5 @@ def _make_semaphore(key: str, concurrency: int, initialized_flag_name: str):
     return _semaphore
 
 
-docker_run_semaphore = _make_semaphore(_RUN_KEY,     DOCKER_RUN_CONCURRENCY, "_run_initialized")
-compile_semaphore    = _make_semaphore(_COMPILE_KEY, COMPILE_CONCURRENCY,    "_compile_initialized")
+docker_run_semaphore = _make_semaphore(_RUN_KEY,     DOCKER_RUN_CONCURRENCY)
+compile_semaphore    = _make_semaphore(_COMPILE_KEY, COMPILE_CONCURRENCY)

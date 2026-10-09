@@ -3,7 +3,20 @@ import sys
 import json
 import traceback
 import inspect
-from collections import deque
+import threading
+
+# LeetCode-style prelude: these are available without an import.
+from typing import *
+import collections, heapq, bisect, math, itertools, functools, string, re, random, operator
+from collections import Counter, OrderedDict, defaultdict, deque, namedtuple
+from heapq import heapify, heappop, heappush, heappushpop, heapreplace, nlargest, nsmallest
+from bisect import bisect, bisect_left, bisect_right, insort, insort_left, insort_right
+from functools import cache, cmp_to_key, lru_cache, reduce
+from itertools import accumulate, combinations, permutations, product
+from math import ceil, comb, floor, gcd, inf, isqrt, log2, sqrt
+
+RESULT_START = "__JUDGE_RESULT_7f3a__"
+RESULT_END = "__JUDGE_END_7f3a__"
 
 # ==============================
 # Built-in Data Structures
@@ -221,53 +234,86 @@ def auto_convert_output(result):
 def call_function(func, converted_input):
     sig = inspect.signature(func)
     param_count = len(sig.parameters)
+    args = list(converted_input.values())
 
     if param_count == len(converted_input):
-        return func(*converted_input.values())
+        return func(*args), args
 
-    return func(**converted_input)
+    result = func(**converted_input)
+    return result, list(converted_input.values())
+
+
+def _user_function(function_name):
+    # Only functions defined in the submission count, not names that the
+    # prelude imported (e.g. heapq.merge for a problem called "merge").
+    func = globals().get(function_name)
+    if inspect.isfunction(func) and func.__module__ == __name__:
+        return func
+    return None
 
 
 def execute_function(function_name, test_input):
 
     converted_input = auto_convert_inputs(test_input)
 
-    # Top-level function
-    if function_name in globals() and callable(globals()[function_name]):
-        func = globals()[function_name]
-        result = call_function(func, converted_input)
-        return auto_convert_output(result)
-
-    # Class-based Solution
-    if "Solution" in globals():
+    func = None
+    if "Solution" in globals() and inspect.isclass(globals()["Solution"]):
         solution_instance = globals()["Solution"]()
-
         if hasattr(solution_instance, function_name):
-            method = getattr(solution_instance, function_name)
-            result = call_function(method, converted_input)
-            return auto_convert_output(result)
+            func = getattr(solution_instance, function_name)
 
-    raise Exception(f"Function '{function_name}' not found")
+    if func is None:
+        func = _user_function(function_name)
+
+    if func is None:
+        raise Exception(f"Function '{function_name}' not found")
+
+    result, args = call_function(func, converted_input)
+    output = {"result": auto_convert_output(result)}
+    if result is None and args:
+        # In-place problems (e.g. moveZeroes) return nothing; the judge
+        # compares the mutated first argument instead.
+        output["mutated"] = auto_convert_output(args[0])
+    return output
+
+
+def emit(obj):
+    sys.stdout.flush()
+    sys.stdout.write(RESULT_START + json.dumps(obj) + RESULT_END + chr(10))
+    sys.stdout.flush()
 
 
 def main():
-    try:
-        raw_input = sys.stdin.read()
-        payload = json.loads(raw_input)
+    exit_code = [0]
 
-        function_name = payload["function_name"]
-        test_input = payload["input"]
+    def run():
+        try:
+            raw_input = sys.stdin.read()
+            payload = json.loads(raw_input)
 
-        result = execute_function(function_name, test_input)
+            function_name = payload["function_name"]
+            test_input = payload["input"]
 
-        print(json.dumps({"result": result}))
+            emit(execute_function(function_name, test_input))
 
-    except Exception as e:
-        print(json.dumps({
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }))
-        sys.exit(1)
+        except RecursionError:
+            emit({"error": "RecursionError: maximum recursion depth exceeded"})
+            exit_code[0] = 1
+        except BaseException as e:
+            message = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            emit({
+                "error": message,
+                "trace": traceback.format_exc()
+            })
+            exit_code[0] = 1
+
+    # Deep recursion (DFS on 10^5 nodes) needs a bigger stack than the default.
+    sys.setrecursionlimit(1_000_000)
+    threading.stack_size(512 * 1024 * 1024)
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join()
+    sys.exit(exit_code[0])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -23,7 +24,6 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
 )
 from .csharp_wrapper import CSHARP_WRAPPER_TEMPLATE
@@ -152,31 +152,7 @@ class CSharpExecutor(BaseExecutor):
             "docker", "exec", "-i", self.container_id,
             "dotnet", "/app/SandboxApp/bin/Release/net8.0/SandboxApp.dll",
         ]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                message = json.loads(stdout_str).get("error", "Runtime error")
-            except Exception:
-                message = stderr.decode() or "Runtime error"
-            raise RuntimeExecutionError(message)
-
-        try:
-            return json.loads(stdout_str)["result"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid output format")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):
         if self.container_id:

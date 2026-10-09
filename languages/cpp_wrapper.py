@@ -1,76 +1,44 @@
 CPP_WRAPPER_TEMPLATE = r"""
-
 #include "/opt/cpp_support.hpp"
 
 // ======================================================
-// FUNCTION FORWARD DECLARATION (AUTO-INJECTED)
+// USER CODE
 // ======================================================
 
-__FUNCTION_SIGNATURE_PLACEHOLDER__
+__USER_CODE_PLACEHOLDER__
 
 // ======================================================
-// MAIN EXECUTION ENTRY
+// MAIN EXECUTION ENTRY (AUTO-GENERATED)
 // ======================================================
 
 int main() {
+    string _stdin_raw((istreambuf_iterator<char>(cin)), istreambuf_iterator<char>());
+
+    json _payload;
     try {
-        ios::sync_with_stdio(false);
-        cin.tie(nullptr);
+        _payload = json::parse(_stdin_raw);
+    } catch (...) {
+        judge::emitError("Invalid JSON input");
+        return 1;
+    }
 
-        string _stdin_raw;
-        if (!getline(cin, _stdin_raw)) {
-            cout << "{\"error\":\"No input received\"}";
-            return 1;
-        }
-
-        json j;
-
-        try {
-            j = json::parse(_stdin_raw);
-        } catch (...) {
-            cout << "{\"error\":\"Invalid JSON input\"}";
-            return 1;
-        }
-
-        // ==================================================
-        // PARAMETER DESERIALIZATION (AUTO-GENERATED)
-        // ==================================================
+    try {
+        judge::Input _in(_payload, __SKIP_POS_PLACEHOLDER__);
 
         __PARAMETER_DESERIALIZATION_PLACEHOLDER__
 
-        // ==================================================
-        // FUNCTION INVOCATION
-        // ==================================================
+        json _output;
+        __CALL_AND_SERIALIZE_PLACEHOLDER__
 
-        auto result = __FUNCTION_NAME_PLACEHOLDER__(
-            __FUNCTION_ARGUMENT_LIST_PLACEHOLDER__
-        );
-
-        // ==================================================
-        // RETURN TYPE SERIALIZATION
-        // ==================================================
-
-        json output;
-
-        __RETURN_SERIALIZATION_PLACEHOLDER__
-
-        cout << output.dump();
-
+        judge::emit(_output);
     } catch (const exception& e) {
-        cout << "{\"error\":\"" << e.what() << "\"}";
+        judge::emitError(e.what());
         return 1;
     } catch (...) {
-        cout << "{\"error\":\"Unknown runtime error\"}";
+        judge::emitError("Unknown runtime error");
         return 1;
     }
 
     return 0;
 }
-
-// ======================================================
-// USER CODE INJECTION
-// ======================================================
-
-__USER_CODE_PLACEHOLDER__
-
 """

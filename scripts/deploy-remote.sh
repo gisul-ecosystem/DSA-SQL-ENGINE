@@ -16,6 +16,10 @@ fi
 mkdir -p "${DEPLOY_PATH}"
 cd "${DEPLOY_PATH}"
 
+# The live sandbox mount contains root-owned temp dirs; keep it out of the
+# sandbox image build context or `docker build .` fails with "can't stat".
+printf 'sandbox\n.env\n' > .dockerignore
+
 echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 docker pull "${IMAGE}"
 
@@ -77,7 +81,7 @@ for f in docker/python.Dockerfile docker/js.Dockerfile docker/java.Dockerfile \
          docker/kotlin.Dockerfile docker/cpp.Dockerfile docker/cpp_support.hpp \
          docker/go.Dockerfile docker/rust.Dockerfile docker/csharp.Dockerfile; do
   [ -f "$f" ] || continue
-  sed -i "/^${f}=/d" "${CHECKSUM_FILE}" 2>/dev/null || true
+  sed -i "\|^${f}=|d" "${CHECKSUM_FILE}" 2>/dev/null || true
   echo "${f}=$(sha256sum "$f" | awk '{print $1}')" >> "${CHECKSUM_FILE}"
 done
 

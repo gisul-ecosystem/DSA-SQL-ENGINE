@@ -1,24 +1,85 @@
 GO_WRAPPER_TEMPLATE = r"""
 package main
 
-import (
-    "encoding/json"
-    "fmt"
-    "io"
-    "os"
-    "reflect"
-    "sort"
-    "strings"
-)
+__IMPORTS_PLACEHOLDER__
+
+const resultStart = "__JUDGE_RESULT_7f3a__"
+const resultEnd = "__JUDGE_END_7f3a__"
 
 type payload struct {
     FunctionName string                     `json:"function_name"`
     Input        map[string]json.RawMessage `json:"input"`
+    Keys         []string                   `json:"keys"`
 }
 
-type output struct {
-    Result interface{} `json:"result,omitempty"`
-    Error  string      `json:"error,omitempty"`
+// pickArg returns the JSON value for a parameter: by name when the test case
+// uses the parameter's name, otherwise by position.
+func pickArg(input map[string]json.RawMessage, keys []string, name string, idx int, skipPos bool) (json.RawMessage, bool) {
+    if raw, ok := input[name]; ok {
+        return raw, true
+    }
+    positional := []string{}
+    for _, k := range keys {
+        if skipPos && k == "pos" {
+            continue
+        }
+        positional = append(positional, k)
+    }
+    if idx < len(positional) {
+        raw, ok := input[positional[idx]]
+        return raw, ok
+    }
+    return nil, false
+}
+
+// LeetCode writes Go byte values (chars) as one-character strings.
+func decodeByte(raw json.RawMessage) (byte, error) {
+    var s string
+    if err := json.Unmarshal(raw, &s); err == nil {
+        if len(s) == 0 {
+            return 0, nil
+        }
+        return s[0], nil
+    }
+    var n int
+    err := json.Unmarshal(raw, &n)
+    return byte(n), err
+}
+
+func decodeBytes(raw json.RawMessage) ([]byte, error) {
+    var s string
+    if err := json.Unmarshal(raw, &s); err == nil {
+        return []byte(s), nil
+    }
+    var items []json.RawMessage
+    if err := json.Unmarshal(raw, &items); err != nil {
+        return nil, err
+    }
+    out := make([]byte, len(items))
+    for i, item := range items {
+        b, err := decodeByte(item)
+        if err != nil {
+            return nil, err
+        }
+        out[i] = b
+    }
+    return out, nil
+}
+
+func decodeByteGrid(raw json.RawMessage) ([][]byte, error) {
+    var rows []json.RawMessage
+    if err := json.Unmarshal(raw, &rows); err != nil {
+        return nil, err
+    }
+    out := make([][]byte, len(rows))
+    for i, row := range rows {
+        b, err := decodeBytes(row)
+        if err != nil {
+            return nil, err
+        }
+        out[i] = b
+    }
+    return out, nil
 }
 
 type ListNode struct {
@@ -244,9 +305,30 @@ func autoConvertOutput(value interface{}) interface{} {
     }
 }
 
+func bytesToStrings(b []byte) []string {
+    out := make([]string, len(b))
+    for i, c := range b {
+        out[i] = string(c)
+    }
+    return out
+}
+
 func normalizeGenericOutput(value interface{}) interface{} {
     if value == nil {
         return nil
+    }
+
+    switch v := value.(type) {
+    case byte:
+        return string(v)
+    case []byte:
+        return bytesToStrings(v)
+    case [][]byte:
+        out := make([][]string, len(v))
+        for i, row := range v {
+            out[i] = bytesToStrings(row)
+        }
+        return out
     }
 
     rv := reflect.ValueOf(value)
@@ -259,47 +341,58 @@ func normalizeGenericOutput(value interface{}) interface{} {
 
 {source_code}
 
-func execute(input map[string]json.RawMessage) (interface{}, error) {
+func execute(input map[string]json.RawMessage, keys []string) (out map[string]interface{}, err error) {
+    defer func() {
+        if r := recover(); r != nil {
+            err = fmt.Errorf("panic: %v", r)
+        }
+    }()
 __PARAM_BINDINGS_PLACEHOLDER__
 
 __INVOKER_SETUP_PLACEHOLDER__
 __CALL_PLACEHOLDER__
 }
 
+func emit(obj map[string]interface{}) {
+    data, err := json.Marshal(obj)
+    if err != nil {
+        data, _ = json.Marshal(map[string]interface{}{"error": "failed to serialize output: " + err.Error()})
+    }
+    os.Stdout.WriteString(resultStart + string(data) + resultEnd + "\n")
+}
+
+func fail(message string) {
+    emit(map[string]interface{}{"error": message})
+    os.Exit(1)
+}
+
 func main() {
+    // Report runaway recursion as a stack overflow before it exhausts the
+    // container's memory (Go's default limit is 1 GB).
+    debug.SetMaxStack(256 << 20)
+
     raw, err := io.ReadAll(os.Stdin)
     if err != nil {
-        _ = json.NewEncoder(os.Stdout).Encode(output{Error: "failed to read input"})
-        os.Exit(1)
+        fail("failed to read input")
     }
 
     if len(strings.TrimSpace(string(raw))) == 0 {
-        _ = json.NewEncoder(os.Stdout).Encode(output{Error: "no input provided"})
-        os.Exit(1)
+        fail("no input provided")
     }
 
     var p payload
     if err := json.Unmarshal(raw, &p); err != nil {
-        _ = json.NewEncoder(os.Stdout).Encode(output{Error: "invalid JSON input"})
-        os.Exit(1)
+        fail("invalid JSON input")
     }
 
     if p.FunctionName != "" && p.FunctionName != "__FUNCTION_NAME_PLACEHOLDER__" {
-        _ = json.NewEncoder(os.Stdout).Encode(output{
-            Error: fmt.Sprintf("function '%s' not found", p.FunctionName),
-        })
-        os.Exit(1)
+        fail(fmt.Sprintf("function '%s' not found", p.FunctionName))
     }
 
-    result, execErr := execute(p.Input)
+    result, execErr := execute(p.Input, p.Keys)
     if execErr != nil {
-        _ = json.NewEncoder(os.Stdout).Encode(output{Error: execErr.Error()})
-        os.Exit(1)
+        fail(execErr.Error())
     }
-
-    if err := json.NewEncoder(os.Stdout).Encode(output{Result: result}); err != nil {
-        _ = json.NewEncoder(os.Stdout).Encode(output{Error: "failed to serialize output"})
-        os.Exit(1)
-    }
+    emit(result)
 }
 """

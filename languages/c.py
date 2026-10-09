@@ -9,6 +9,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper, run_batch_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -24,13 +25,29 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
+    CPP_COMPILE_OPT_LEVEL,
 )
-from .c_wrapper import C_WRAPPER_TEMPLATE
+from .c_signature import parse_signature
+from .c_wrapper import C_PRELUDE, C_WRAPPER_TEMPLATE
 
 PIPE = asyncio.subprocess.PIPE
 DEVNULL = asyncio.subprocess.DEVNULL
+
+_SCALAR_TYPES = {
+    "int": "int", "long": "long", "long long": "long long", "short": "short",
+    "unsigned": "unsigned", "unsigned int": "unsigned int", "unsigned long": "unsigned long",
+    "unsigned long long": "unsigned long long", "double": "double", "float": "float",
+    "bool": "bool", "_Bool": "bool", "char": "char", "size_t": "size_t",
+    "int32_t": "int32_t", "int64_t": "int64_t", "uint32_t": "uint32_t", "uint64_t": "uint64_t",
+}
+_ARRAY_TYPES = {f"{t}*": t for t in ("int", "long", "long long", "double", "float", "unsigned int", "int64_t")}
+
+
+def _normalize(type_text: str) -> str:
+    t = re.sub(r"\bconst\b", "", type_text)
+    t = " ".join(t.split())
+    return re.sub(r"\s*\*", "*", t)
 
 
 class CExecutor(BaseExecutor):
@@ -79,17 +96,24 @@ class CExecutor(BaseExecutor):
             self.container_id = stdout.decode().strip()
 
         wrapped_code = self._generate_wrapper()
-        if "__PLACEHOLDER__" in wrapped_code:
-            raise CompileError("Wrapper placeholder replacement failed")
 
+        # The submission is compiled as C (so e.g. `int* r = malloc(...)` works)
+        # and linked with the C++ harness that reads JSON and calls it.
+        files = {
+            "judge_prelude.h": C_PRELUDE,
+            "user.c": self.code,
+            "solution.cpp": wrapped_code,
+        }
+        for name, content in files.items():
+            with open(os.path.join(self.temp_dir, name), "w", encoding="utf-8") as f:
+                f.write(content)
         self.file_path = os.path.join(self.temp_dir, "solution.cpp")
-        with open(self.file_path, "w", encoding="utf-8") as f:
-            f.write(wrapped_code)
 
-        compile_cmd = [
-            "docker", "exec", self.container_id,
-            "g++", "solution.cpp", "-O2", "-std=c++20", "-o", "solution",
-        ]
+        build = (
+            "gcc -std=gnu17 -O2 -include judge_prelude.h -c user.c -o user.o"
+            f" && g++ -std=c++20 -pipe {CPP_COMPILE_OPT_LEVEL} solution.cpp user.o -o solution -lm"
+        )
+        compile_cmd = ["docker", "exec", self.container_id, "sh", "-c", build]
 
         async with compile_semaphore():
             proc = await asyncio.create_subprocess_exec(*compile_cmd, stdout=PIPE, stderr=PIPE)
@@ -101,72 +125,29 @@ class CExecutor(BaseExecutor):
                 raise CompileError("Compilation timed out")
 
         if proc.returncode != 0:
-            raise CompileError(stderr.decode())
+            raise CompileError(stderr.decode(errors="replace").strip()[:1000] or "Compilation failed")
 
     async def run(self, test_input: dict):
         if not self.container_id:
             raise RuntimeExecutionError("Container not initialized")
 
-        payload = json.dumps(test_input).encode()
+        payload = json.dumps({"keys": list(test_input), "values": list(test_input.values())}).encode()
         exec_cmd = ["docker", "exec", "-i", self.container_id, "./solution"]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            raise RuntimeExecutionError(
-                stderr.decode().strip() or stdout_str.strip() or "Runtime error"
-            )
-
-        try:
-            return json.loads(stdout_str.strip())
-        except Exception:
-            raise RuntimeExecutionError("Invalid JSON output")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def run_batch(self, test_cases: list[dict]):
         if not self.container_id:
             raise RuntimeExecutionError("Container not initialized")
 
         payload = json.dumps({
-            "test_cases": [{"input": tc["input"]} for tc in test_cases],
+            "test_cases": [
+                {"keys": list(tc["input"]), "values": list(tc["input"].values())}
+                for tc in test_cases
+            ],
         }).encode()
         exec_cmd = ["docker", "exec", "-i", self.container_id, "./solution"]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
         timeout = max(EXECUTION_TIMEOUT_SECONDS, EXECUTION_TIMEOUT_SECONDS * len(test_cases))
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                message = json.loads(stdout_str).get("error", "Runtime error")
-            except Exception:
-                message = stderr.decode().strip() or stdout_str.strip() or "Runtime error"
-            raise RuntimeExecutionError(message)
-
-        try:
-            return json.loads(stdout_str.strip())["results"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid JSON output")
+        return await run_batch_wrapper(exec_cmd, payload, timeout, len(test_cases))
 
     async def cleanup(self):
         if self.container_id:
@@ -176,256 +157,159 @@ class CExecutor(BaseExecutor):
             self.host_temp_dir = None
             await container_pool.release(self.IMAGE_NAME, cid, td, htd)
 
+    # ------------------------------------------------------------------
+    # Wrapper generation
+    #
+    # LeetCode C conventions handled here:
+    #   int* nums, int numsSize            array + its length (filled in)
+    #   int** grid, int gridSize, int* gridColSize
+    #   char* s / char** strs / char** grid (list of strings or char grid)
+    #   int* returnSize, int** returnColumnSizes   output sizes
+    #   struct ListNode* / struct TreeNode*
+    #   void f(...)                        in place: the first argument is compared
+    # ------------------------------------------------------------------
+
     def _generate_wrapper(self):
-        return_type, params = self._parse_signature()
-        is_void = return_type == "void"
-        is_ptr_return = return_type in ("int*", "int[]")
+        sig = parse_signature(self.code, self.function_name)
+        return_type = _normalize(sig.return_type)
 
-        # --- Detect LeetCode-style returnSize output param ---
-        # Pattern: int* f(int* arr, int n, int* returnSize)
-        # returnSize is an output-only param (int*) whose name contains "size".
-        # It must NOT be deserialized from JSON input.
-        return_size_name: str | None = None
-        if is_ptr_return:
-            for pt, pn in params:
-                clean = re.sub(r"\s+", "", pt.replace("const", "").strip())
-                if clean == "int*" and re.search(r"size", pn, re.IGNORECASE):
-                    return_size_name = pn
+        bindings: list[str] = []
+        call_args: list[str] = []
+        sized: dict | None = None      # last array-like argument, for numsSize / gridColSize
+        first_input: dict | None = None
+        has_return_size = has_return_cols = False
+        json_index = 0
 
-        # --- Detect LeetCode-style array-size companion params ---
-        # Pattern: f(char** ops, int opsSize) or f(int* arr, int arrSize)
-        # A plain int param whose name ends with "Size" (case-insensitive) and
-        # follows an array param is auto-filled from the array length — not read
-        # from JSON input (the test case input only has the array itself).
-        array_size_params: set[str] = set()
-        prev_was_array = False
-        for pt, pn in params:
-            clean = re.sub(r"\s+", "", pt.replace("const", "").strip())
-            if clean in ("int*", "int[]", "char**", "char*"):
-                prev_was_array = True
-            elif clean == "int" and prev_was_array and re.search(r"size", pn, re.IGNORECASE):
-                array_size_params.add(pn)
-                prev_was_array = False
+        for index, param in enumerate(sig.params):
+            t = _normalize(param.type)
+            var = f"_a{index}"
+            name = param.name
+
+            if t == "int*" and re.search(r"return.*size", name, re.IGNORECASE):
+                bindings += ["int _returnSize = 0;", f"int* {var} = &_returnSize;"]
+                has_return_size = True
+            elif t == "int**" and re.search(r"return.*col", name, re.IGNORECASE):
+                bindings += ["int* _returnCols = nullptr;", f"int** {var} = &_returnCols;"]
+                has_return_cols = True
+            elif t == "int*" and re.search(r"col(umn)?size", name, re.IGNORECASE) and sized and sized.get("cols"):
+                bindings.append(f"int* {var} = {sized['cols']}.data();")
+            elif t in ("int", "size_t") and re.search(r"size$", name, re.IGNORECASE) and sized:
+                bindings.append(f"{t} {var} = {sized['size']};")
             else:
-                prev_was_array = False
+                arg = f'_in.arg("{name}", {json_index})'
+                json_index += 1
+                info = self._bind_input(t, var, arg, bindings)
+                if info is None:
+                    raise CompileError(f"Unsupported C parameter type: {param.type} {name}")
+                if info.get("size"):
+                    sized = info
+                if first_input is None:
+                    first_input = info
 
-        # --- Detect void output param ---
-        output_param = None
-        if is_void:
-            array_params = [(pt, pn) for pt, pn in params if pt in ("int[]", "int*")]
-            named_out = [(pt, pn) for pt, pn in array_params if pn.lower() in ("result", "output", "out", "ans")]
-            output_param = named_out[-1] if named_out else (array_params[-1] if array_params else None)
+            call_args.append(var)
 
-        param_deserialization = []
-        param_names = []
-        first_input_array_size: str | None = None
+        call = f"::{self.function_name}({', '.join(call_args)})"
+        lines = self._call_and_serialize(return_type, call, first_input, has_return_size, has_return_cols)
 
-        for idx, (param_type, param_name) in enumerate(params):
-            clean_type = param_type.replace("const", "").strip()
-            clean_type = re.sub(r"\s+", "", clean_type)
-
-            # returnSize is output-only — skip JSON deserialization, declare later
-            if param_name == return_size_name:
-                param_names.append(param_name)
-                continue
-
-            # array-size companion (e.g. operationsSize) — auto-fill from array, skip JSON
-            if param_name in array_size_params:
-                param_names.append(param_name)
-                continue
-
-            # Use positional access: pick the i-th value from the input object.
-            # This matches how Python/JS/Java wrappers dispatch — by argument
-            # position, not by JSON key name — so param names in the user's
-            # function signature don't have to match the test-case input keys.
-            # We store a const json& reference to avoid repeating the iterator expr.
-            # NOTE: we use the number of JSON keys seen so far (not idx) because
-            # returnSize is not in the JSON input at all.
-            json_idx = sum(
-                1 for i, (_, pn) in enumerate(params[:idx])
-                if pn != return_size_name and pn not in array_size_params
-            )
-            ref_var = f"_arg{json_idx}"
-            param_deserialization.append(
-                f'const json& {ref_var} = std::next(j.items().begin(), {json_idx}).value();'
-            )
-            val_expr = ref_var
-
-            if clean_type == "int":
-                param_deserialization.append(f'int {param_name} = {val_expr}.get<int>();')
-            elif clean_type == "long":
-                param_deserialization.append(f'long {param_name} = {val_expr}.get<long>();')
-            elif clean_type == "double":
-                param_deserialization.append(f'double {param_name} = {val_expr}.get<double>();')
-            elif clean_type in ("int[]", "int*"):
-                param_deserialization.append(
-                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
-                )
-                param_deserialization.append(f'int* {param_name} = {param_name}_vec.data();')
-                if first_input_array_size is None:
-                    first_input_array_size = f"{param_name}_vec.size()"
-            elif re.fullmatch(r"int\[\d+\]", clean_type):
-                dim = re.findall(r"\d+", clean_type)[0]
-                param_deserialization.append(
-                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
-                )
-                param_deserialization.append(f'int {param_name}[{dim}] = {{0}};')
-                param_deserialization.append(
-                    f'for (size_t i = 0; i < {param_name}_vec.size() && i < {dim}; ++i) {param_name}[i] = {param_name}_vec[i];'
-                )
-                if first_input_array_size is None:
-                    first_input_array_size = f"{param_name}_vec.size()"
-            elif re.fullmatch(r"int\[\d+\]\[\d+\]", clean_type):
-                rows, cols = re.findall(r"\d+", clean_type)
-                param_deserialization.append(
-                    f'vector<vector<int>> {param_name}_vec = {val_expr}.get<vector<vector<int>>>();'
-                )
-                param_deserialization.append(f'int {param_name}[{rows}][{cols}] = {{0}};')
-                param_deserialization.append(
-                    f'for (size_t i = 0; i < {param_name}_vec.size() && i < {rows}; ++i) {{'
-                )
-                param_deserialization.append(
-                    f'    for (size_t j_idx = 0; j_idx < {param_name}_vec[i].size() && j_idx < {cols}; ++j_idx) {{'
-                )
-                param_deserialization.append(
-                    f'        {param_name}[i][j_idx] = {param_name}_vec[i][j_idx];'
-                )
-                param_deserialization.append('    }')
-                param_deserialization.append('}')
-            elif clean_type == "char*":
-                param_deserialization.append(f'string {param_name}_tmp = {val_expr}.get<string>();')
-                param_deserialization.append(f'char* {param_name} = (char*){param_name}_tmp.c_str();')
-            elif clean_type == "char**":
-                # Array of C strings — deserialize from JSON array of strings.
-                # Also accept a multiline string input and split it into lines
-                # (same format as vector<string>).
-                param_deserialization.append(f'vector<string> {param_name}_strvec;')
-                param_deserialization.append(f'if ({val_expr}.is_array()) {{')
-                param_deserialization.append(f'    {param_name}_strvec = {val_expr}.get<vector<string>>();')
-                param_deserialization.append(f'}} else {{')
-                param_deserialization.append(f'    string _raw_{param_name} = {val_expr}.get<string>();')
-                param_deserialization.append(f'    istringstream _iss_{param_name}(_raw_{param_name});')
-                param_deserialization.append(f'    string _ln_{param_name};')
-                param_deserialization.append(f'    bool _first_{param_name} = true;')
-                param_deserialization.append(f'    while (getline(_iss_{param_name}, _ln_{param_name})) {{')
-                param_deserialization.append(f'        if (!_ln_{param_name}.empty() && _ln_{param_name}.back() == \'\\r\') _ln_{param_name}.pop_back();')
-                param_deserialization.append(f'        if (_ln_{param_name}.empty()) continue;')
-                param_deserialization.append(f'        if (_first_{param_name}) {{ _first_{param_name} = false;')
-                param_deserialization.append(f'            bool _isc = true; for (char _c : _ln_{param_name}) if (!isdigit(_c)) {{ _isc = false; break; }}')
-                param_deserialization.append(f'            if (_isc) continue; }}')
-                param_deserialization.append(f'        {param_name}_strvec.push_back(_ln_{param_name});')
-                param_deserialization.append(f'    }}')
-                param_deserialization.append(f'}}')
-                param_deserialization.append(f'vector<char*> {param_name}_ptrvec;')
-                param_deserialization.append(f'for (auto& s : {param_name}_strvec) {param_name}_ptrvec.push_back(&s[0]);')
-                param_deserialization.append(f'char** {param_name} = {param_name}_ptrvec.data();')
-                if first_input_array_size is None:
-                    first_input_array_size = f"{param_name}_strvec.size()"
-            else:
-                raise CompileError(f"Unsupported C type: {clean_type}")
-
-            param_names.append(param_name)
-
-        # Declare returnSize as a local int (written to by the function)
-        if return_size_name:
-            param_deserialization.append(f'int {return_size_name}_val = 0;')
-            param_deserialization.append(f'int* {return_size_name} = &{return_size_name}_val;')
-
-        # Declare array-size companion params (e.g. operationsSize) from array length
-        for sp in array_size_params:
-            size_expr = first_input_array_size or "0"
-            param_deserialization.append(f'int {sp} = (int)({size_expr});')
-
-        output_param_already_initialized = False
-        if output_param:
-            output_param_already_initialized = any(
-                pn == output_param[1] for _, pn in params
-            ) and any(
-                f'{output_param[1]}_vec' in line
-                for line in param_deserialization
-            )
-
-        if is_void and output_param and not output_param_already_initialized:
-            out_name = output_param[1]
-            size_expr = first_input_array_size or "0"
-            param_deserialization.append(f'vector<int> {out_name}_vec({size_expr});')
-            param_deserialization.append(f'int* {out_name} = {out_name}_vec.data();')
-
-        if is_void:
-            function_call = f'{self.function_name}({", ".join(param_names)});'
-            if output_param:
-                out_name = output_param[1]
-                return_serialization = f'output = json({out_name}_vec);'
-            else:
-                return_serialization = "output = nullptr;"
-        elif is_ptr_return:
-            function_call = f'auto result = {self.function_name}({", ".join(param_names)});'
-            if return_size_name:
-                return_serialization = (
-                    f'output = json(vector<int>(result, result + {return_size_name}_val));'
-                )
-            else:
-                size_expr = first_input_array_size or "0"
-                return_serialization = (
-                    f'output = json(vector<int>(result, result + {size_expr}));'
-                )
-        else:
-            function_call = f'auto result = {self.function_name}({", ".join(param_names)});'
-            return_serialization = "output = result;"
-        def decl_param(param_type: str, param_name: str) -> str:
-            normalized = param_type if param_type != "int[]" else "int*"
-            array_match = re.fullmatch(r"(.+?)(\[[^\]]+\](?:\[[^\]]+\])*)", normalized.replace(" ", ""))
-            if array_match:
-                base_type, suffix = array_match.groups()
-                return f"{base_type} {param_name}{suffix}"
-            return f"{normalized} {param_name}"
-
-        forward_decl = (
-            f"{return_type} {self.function_name}"
-            f"({', '.join(decl_param(pt, pn) for pt, pn in params)});"
-        )
-
+        declaration = f"{sig.return_type} {self.function_name}({sig.raw_params or 'void'});"
+        indent = "\n    "
         return (
             C_WRAPPER_TEMPLATE
-            .replace("__FUNCTION_SIGNATURE_PLACEHOLDER__", forward_decl)
-            .replace(
-                "__PARAMETER_DESERIALIZATION_PLACEHOLDER__",
-                "\n        ".join(param_deserialization),
-            )
-            .replace("__FUNCTION_CALL_PLACEHOLDER__", function_call)
-            .replace("__RETURN_SERIALIZATION_PLACEHOLDER__", return_serialization)
-            .replace("__USER_CODE_PLACEHOLDER__", self.code)
+            .replace("__FUNCTION_DECLARATION_PLACEHOLDER__", declaration)
+            .replace("__SKIP_POS_PLACEHOLDER__", "true" if any("ListNode" in p.type for p in sig.params) else "false")
+            .replace("__PARAMETER_DESERIALIZATION_PLACEHOLDER__", indent.join(bindings))
+            .replace("__CALL_AND_SERIALIZE_PLACEHOLDER__", indent.join(lines))
         )
 
-    def _parse_signature(self):
-        pattern = rf'([^\s]+(?:\s*\*?)?)\s+{self.function_name}\s*\((.*?)\)'
-        match = re.search(pattern, self.code, re.DOTALL)
-        if not match:
-            raise CompileError("Could not parse function signature")
+    def _bind_input(self, t: str, var: str, arg: str, bindings: list[str]) -> dict | None:
+        """Declare `var` from JSON; return how to size and re-serialize it."""
+        if t in _SCALAR_TYPES:
+            ctype = _SCALAR_TYPES[t]
+            bindings.append(f"{ctype} {var} = judge::Arg<{ctype}>::get({arg});")
+            return {"mutated": None}
 
-        return_type = match.group(1).strip()
-        params_str = match.group(2).strip()
-        params = []
+        if t in _ARRAY_TYPES:
+            elem = _ARRAY_TYPES[t]
+            bindings += [
+                f"vector<{elem}> {var}_v = judge::Arg<vector<{elem}>>::get({arg});",
+                f"{elem}* {var} = {var}_v.data();",
+            ]
+            return {"size": f"(int){var}_v.size()", "mutated": f"json({var}_v)"}
 
-        if params_str:
-            raw_params = [p.strip() for p in params_str.split(",")]
-            for raw_param in raw_params:
-                parts = raw_param.split()
-                raw_name = parts[-1]
-                pointer_prefix = ""
-                while raw_name.startswith("*"):
-                    pointer_prefix += "*"
-                    raw_name = raw_name[1:]
-                array_suffix = "".join(re.findall(r"(\[[^\]]*\])", raw_name))
-                is_array = "[]" in raw_name
-                param_name = re.sub(r"\[[^\]]*\]", "", raw_name).replace("&", "").replace("*", "")
-                param_type = " ".join(parts[:-1]).replace("&", "").strip()
-                if pointer_prefix:
-                    param_type = f"{param_type}{pointer_prefix}"
-                if array_suffix and "*" not in param_type:
-                    param_type = f"{param_type}{array_suffix}"
-                elif is_array and "[]" not in param_type and "*" not in param_type:
-                    param_type = param_type + "[]"
-                params.append((param_type, param_name))
+        if t == "char*":
+            bindings += [
+                f"const json& {var}_j = {arg};",
+                f"string {var}_s = judge_c::charsToString({var}_j);",
+                f"vector<char> {var}_v({var}_s.begin(), {var}_s.end());",
+                f"{var}_v.push_back('\\0');",
+                f"char* {var} = {var}_v.data();",
+            ]
+            mutated = (
+                f"({var}_j.is_array() ? judge_c::stringToChars({var}, (int){var}_s.size()) : json(string({var})))"
+            )
+            return {"size": f"(int){var}_s.size()", "mutated": mutated}
 
-        return return_type, params
+        if t == "char**":
+            bindings += [
+                f"judge_c::CharRows {var}_rows({arg});",
+                f"char** {var} = {var}_rows.ptrs.data();",
+            ]
+            return {"size": f"(int){var}_rows.rows.size()", "cols": f"{var}_rows.cols", "mutated": f"{var}_rows.toJson()"}
+
+        if t == "int**":
+            bindings += [
+                f"judge_c::IntRows {var}_rows({arg});",
+                f"int** {var} = {var}_rows.ptrs.data();",
+            ]
+            return {"size": f"(int){var}_rows.rows.size()", "cols": f"{var}_rows.cols", "mutated": f"json({var}_rows.rows)"}
+
+        if t in ("struct ListNode*", "ListNode*"):
+            bindings.append(f"ListNode* {var} = judge::Arg<ListNode*>::get({arg});")
+            return {"mutated": f"judge::toJson({var})"}
+
+        if t in ("struct TreeNode*", "TreeNode*"):
+            bindings.append(f"TreeNode* {var} = judge::Arg<TreeNode*>::get({arg});")
+            return {"mutated": f"judge::toJson({var})"}
+
+        return None
+
+    def _call_and_serialize(self, return_type, call, first_input, has_return_size, has_return_cols):
+        if return_type == "void":
+            # In-place problems return nothing; the judge compares the mutated first argument.
+            lines = [f"{call};", '_output["result"] = nullptr;']
+            if first_input and first_input.get("mutated"):
+                lines.append(f'_output["mutated"] = {first_input["mutated"]};')
+            return lines
+
+        lines = [f"auto _result = {call};"]
+        if return_type in _SCALAR_TYPES:
+            ctype = _SCALAR_TYPES[return_type]
+            lines.append(f'_output["result"] = judge::toJson(static_cast<{ctype}>(_result));')
+        elif return_type == "char*":
+            lines.append('_output["result"] = _result ? json(string(_result)) : json(nullptr);')
+        elif return_type in _ARRAY_TYPES:
+            elem = _ARRAY_TYPES[return_type]
+            size = "_returnSize" if has_return_size else (first_input or {}).get("size", "0")
+            lines.append(f'_output["result"] = json(vector<{elem}>(_result, _result + {size}));')
+        elif return_type == "char**":
+            if not has_return_size:
+                raise CompileError("char** return value needs an int* returnSize parameter")
+            lines += [
+                "json _arr = json::array();",
+                "for (int _i = 0; _i < _returnSize; ++_i) _arr.push_back(string(_result[_i]));",
+                '_output["result"] = _arr;',
+            ]
+        elif return_type == "int**":
+            if not (has_return_size and has_return_cols):
+                raise CompileError("int** return value needs returnSize and returnColumnSizes parameters")
+            lines += [
+                "json _arr = json::array();",
+                "for (int _i = 0; _i < _returnSize; ++_i)",
+                "    _arr.push_back(vector<int>(_result[_i], _result[_i] + _returnCols[_i]));",
+                '_output["result"] = _arr;',
+            ]
+        elif return_type in ("struct ListNode*", "ListNode*", "struct TreeNode*", "TreeNode*"):
+            lines.append('_output["result"] = judge::toJson(_result);')
+        else:
+            raise CompileError(f"Unsupported C return type: {return_type}")
+        return lines

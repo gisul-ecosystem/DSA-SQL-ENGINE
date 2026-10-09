@@ -6,6 +6,7 @@ import java.lang.reflect.Method
 import java.util.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.core.type.TypeReference
+{user_imports}
 
 // ==============================
 // Built-in Data Structures
@@ -169,6 +170,9 @@ object Builders {
 
 object Main {
 
+    private const val RESULT_START = "__JUDGE_RESULT_7f3a__"
+    private const val RESULT_END = "__JUDGE_END_7f3a__"
+
     private val mapper = ObjectMapper()
 
     private fun autoConvertOutput(result: Any?): Any? {
@@ -176,39 +180,53 @@ object Main {
             is TreeNode -> Builders.treeToList(result)
             is ListNode -> Builders.linkedListToList(result)
             is Node -> Builders.graphToAdjList(result)
+            // Jackson would write CharArray as one string and Char as a number;
+            // LeetCode writes them as single-character strings.
+            is Char -> result.toString()
+            is CharArray -> result.map { it.toString() }
+            is Array<*> -> result.map { autoConvertOutput(it) }
+            is Collection<*> -> result.map { autoConvertOutput(it) }
             else -> result
         }
     }
 
-    private fun convertValue(value: Any?, targetType: Class<*>, fullInput: Map<String, Any?>): Any? {
+    private fun toChar(value: Any): Char {
+        if (value is Number) return value.toInt().toChar()
+        val s = value.toString()
+        return if (s.isEmpty()) '\u0000' else s[0]
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun convertValue(value: Any?, targetType: Class<*>, genericType: java.lang.reflect.Type, fullInput: Map<String, Any?>): Any? {
 
         if (value == null) return null
 
-        if (targetType == Int::class.java || targetType == Integer.TYPE)
+        if (targetType == Int::class.java || targetType == Integer::class.java)
             return (value as Number).toInt()
 
-        if (targetType == Long::class.java || targetType == java.lang.Long.TYPE)
+        if (targetType == Long::class.java || targetType == java.lang.Long::class.java)
             return (value as Number).toLong()
 
-        if (targetType == Double::class.java || targetType == java.lang.Double.TYPE)
+        if (targetType == Double::class.java || targetType == java.lang.Double::class.java)
             return (value as Number).toDouble()
 
-        if (targetType == Boolean::class.java || targetType == java.lang.Boolean.TYPE)
+        if (targetType == Boolean::class.java || targetType == java.lang.Boolean::class.java)
             return value
+
+        if (targetType == Char::class.java || targetType == java.lang.Character::class.java)
+            return toChar(value)
 
         if (targetType == String::class.java)
             return value.toString()
 
-        if (targetType == IntArray::class.java) {
-            val list = value as List<*>
-            return list.map { (it as Number).toInt() }.toIntArray()
+        if (targetType == CharArray::class.java) {
+            if (value !is List<*>) return value.toString().toCharArray()
+            return value.map { toChar(it!!) }.toCharArray()
         }
 
-        if (targetType == Array<IntArray>::class.java) {
+        if (targetType == Array<CharArray>::class.java) {
             val outer = value as List<*>
-            return outer.map {
-                (it as List<*>).map { n -> (n as Number).toInt() }.toIntArray()
-            }.toTypedArray()
+            return outer.map { convertValue(it, CharArray::class.java, CharArray::class.java, fullInput) as CharArray }.toTypedArray()
         }
 
         if (targetType == TreeNode::class.java)
@@ -222,35 +240,64 @@ object Main {
         if (targetType == Node::class.java)
             return Builders.buildGraph(value as List<List<Int>>)
 
-        return value
+        // Everything else (IntArray, Array<String>, List<List<Int>>, ...) is
+        // converted by Jackson using the full generic parameter type.
+        val javaType = mapper.typeFactory.constructType(genericType)
+        return mapper.convertValue<Any?>(value, javaType)
     }
 
-    private fun executeFunction(functionName: String, input: Map<String, Any?>): Any? {
+    private fun describe(t: Throwable): String {
+        val name = t.javaClass.simpleName
+        return if (t.message == null) name else name + ": " + t.message
+    }
 
-        try {
-            val solutionClass = Class.forName("Solution")
-            val instance = solutionClass.getDeclaredConstructor().newInstance()
+    private fun executeFunction(functionName: String, input: Map<String, Any?>): Map<String, Any?> {
 
-            for (method in solutionClass.declaredMethods) {
+        // A method of `class Solution`, or a top-level function (compiled into MainKt).
+        val solutionClass = listOf("Solution", "MainKt")
+            .mapNotNull { name -> try { Class.forName(name) } catch (e: ClassNotFoundException) { null } }
+            .firstOrNull { cls -> cls.declaredMethods.any { it.name == functionName } }
+            ?: throw Exception("Function '" + functionName + "' not found")
 
-                if (method.name != functionName) continue
+        // "pos" only describes a linked-list cycle; it is not an argument
+        // unless the method actually takes one more parameter.
+        var values: List<Any?> = input.filterKeys { it != "pos" }.values.toList()
 
-                val paramTypes = method.parameterTypes
-                val values = ArrayList(input.values)
-                val args = Array<Any?>(paramTypes.size) { null }
+        var method: Method? = null
+        for (m in solutionClass.declaredMethods) {
+            if (m.name != functionName) continue
+            if (method == null || m.parameterCount == values.size) method = m
+        }
+        if (method == null) throw Exception("Function '" + functionName + "' not found")
+        method.isAccessible = true
 
-                for (i in paramTypes.indices)
-                    args[i] = convertValue(values[i], paramTypes[i], input)
+        if (method.parameterCount > values.size) values = input.values.toList()
 
-                val result = method.invoke(instance, *args)
-                return autoConvertOutput(result)
-            }
-
-        } catch (e: InvocationTargetException) {
-            throw Exception(e.targetException.message)
+        val paramTypes = method.parameterTypes
+        val genericTypes = method.genericParameterTypes
+        val args = Array<Any?>(paramTypes.size) { i ->
+            convertValue(if (i < values.size) values[i] else null, paramTypes[i], genericTypes[i], input)
         }
 
-        throw Exception("Function '$functionName' not found")
+        val instance = if (java.lang.reflect.Modifier.isStatic(method.modifiers)) null
+            else solutionClass.getDeclaredConstructor().newInstance()
+        val result = try {
+            method.invoke(instance, *args)
+        } catch (e: InvocationTargetException) {
+            throw Exception(describe(e.targetException))
+        }
+
+        val output = HashMap<String, Any?>()
+        output["result"] = autoConvertOutput(result)
+        if (method.returnType == Void.TYPE && args.isNotEmpty())
+            output["mutated"] = autoConvertOutput(args[0])
+        return output
+    }
+
+    private fun emit(obj: Any) {
+        System.out.flush()
+        println(RESULT_START + mapper.writeValueAsString(obj) + RESULT_END)
+        System.out.flush()
     }
 
     @JvmStatic
@@ -269,21 +316,17 @@ object Main {
                     object : TypeReference<Map<String, Any?>>() {})
 
             val functionName = payload["function_name"] as String
+            @Suppress("UNCHECKED_CAST")
             val input = payload["input"] as Map<String, Any?>
 
-            val result = executeFunction(functionName, input)
+            emit(executeFunction(functionName, input))
 
-            val response = HashMap<String, Any?>()
-            response["result"] = result
-
-            println(mapper.writeValueAsString(response))
-
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
 
             try {
                 val error = HashMap<String, Any?>()
-                error["error"] = e.message
-                println(mapper.writeValueAsString(error))
+                error["error"] = if (e is Exception && e.message != null) e.message else describe(e)
+                emit(error)
             } catch (_: Exception) {}
 
             System.exit(1)

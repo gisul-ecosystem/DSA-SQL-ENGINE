@@ -13,15 +13,20 @@ from config.limits import (
     DOCKER_NOFILE_LIMIT,
     DOCKER_PIDS_LIMIT,
     EXECUTION_TIMEOUT_SECONDS,
-    MAX_STDOUT_BYTES,
 )
 from execution.base import BaseExecutor
 from execution.exceptions import CompileError, RuntimeExecutionError
+from execution.process import run_wrapper
 from execution.sandbox_paths import build_host_temp_dir, get_sandbox_roots
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore, compile_semaphore
 
-from .rust_wrapper import RUST_WRAPPER_TEMPLATE
+from .rust_wrapper import (
+    LIST_NODE_DEFINITION,
+    RUST_WRAPPER_TEMPLATE,
+    SOLUTION_STRUCT,
+    TREE_NODE_DEFINITION,
+)
 
 PIPE = asyncio.subprocess.PIPE
 DEVNULL = asyncio.subprocess.DEVNULL
@@ -128,34 +133,12 @@ directory = "{self.VENDORED_SOURCE_DIR}"
         if not self.container_id:
             raise RuntimeExecutionError("Container not initialized")
 
-        payload = json.dumps(test_input, separators=(",", ":")).encode()
+        payload = json.dumps({"keys": list(test_input), "values": list(test_input.values())}).encode()
         exec_cmd = [
             "docker", "exec", "-i", self.container_id,
             f"{self.SHARED_TARGET_DIR}/release/runner",
         ]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            raise RuntimeExecutionError(
-                stderr.decode().strip() or stdout_str.strip() or "Runtime error"
-            )
-
-        try:
-            return json.loads(stdout_str.strip())
-        except Exception:
-            raise RuntimeExecutionError("Invalid JSON output")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):
         if self.container_id:
@@ -166,26 +149,63 @@ directory = "{self.VENDORED_SOURCE_DIR}"
             await container_pool.release(self.IMAGE_NAME, cid, td, htd)
 
     def _generate_wrapper(self):
-        _, params = self._parse_signature()
+        return_type, params = self._parse_signature()
+        skip_pos = any("ListNode" in t for t, _ in params)
 
-        param_deserialization = []
-        function_arguments = []
+        bindings = []
+        call_args = []
+        first_mutable = None
+        for index, (param_type, param_name) in enumerate(params):
+            lines, call_arg, mutable_var = self._build_param_binding(
+                self._normalize_type(param_type), index, param_name, skip_pos
+            )
+            bindings.extend(lines)
+            call_args.append(call_arg)
+            if index == 0 and mutable_var:
+                first_mutable = (mutable_var, self._normalize_type(param_type))
 
-        for param_type, param_name in params:
-            normalized_type = self._normalize_type(param_type)
-            binding_code, invocation_arg = self._build_param_binding(normalized_type, param_name)
-            param_deserialization.extend(binding_code)
-            function_arguments.append(invocation_arg)
+        target = "Solution::" if re.search(r"\bimpl\s+Solution\b", self.code) else ""
+        call = f"{target}{self.function_name}({', '.join(call_args)})"
+
+        return_type = self._normalize_type(return_type)
+        if return_type in ("", "()"):
+            # In-place problems return nothing; the judge compares the mutated first argument.
+            mutated = "serde_json::Value::Null"
+            if first_mutable:
+                mutated = self._to_json(first_mutable[1], f"&{first_mutable[0]}")
+            body = [
+                f"{call};",
+                f'serde_json::json!({{"result": serde_json::Value::Null, "mutated": {mutated}}})',
+            ]
+        else:
+            body = [
+                f"let _result = {call};",
+                f'serde_json::json!({{"result": {self._to_json(return_type, "&_result")}}})',
+            ]
+
+        definitions = []
+        if not re.search(r"\bstruct\s+TreeNode\b", self.code):
+            definitions.append(TREE_NODE_DEFINITION)
+        if not re.search(r"\bstruct\s+ListNode\b", self.code):
+            definitions.append(LIST_NODE_DEFINITION)
+        has_solution = re.search(r"\bstruct\s+Solution\b", self.code)
 
         return (
             RUST_WRAPPER_TEMPLATE
-            .replace("__FUNCTION_SIGNATURE_PLACEHOLDER__", "")
-            .replace("__PARAMETER_DESERIALIZATION_PLACEHOLDER__", "\n    ".join(param_deserialization))
-            .replace("__FUNCTION_NAME_PLACEHOLDER__", self.function_name)
-            .replace("__FUNCTION_ARGUMENT_LIST_PLACEHOLDER__", ", ".join(function_arguments))
-            .replace("__RETURN_SERIALIZATION_PLACEHOLDER__", "json!(result)")
+            .replace("__SOLUTION_STRUCT_PLACEHOLDER__", "" if has_solution else SOLUTION_STRUCT)
+            .replace("__NODE_DEFINITIONS_PLACEHOLDER__", "\n".join(definitions))
+            .replace("__PARAMETER_DESERIALIZATION_PLACEHOLDER__", "\n    ".join(bindings))
+            .replace("__CALL_AND_SERIALIZE_PLACEHOLDER__", "\n    ".join(body))
             .replace("__USER_CODE_PLACEHOLDER__", self.code)
         )
+
+    def _to_json(self, type_name: str, expr: str) -> str:
+        bare = type_name.lstrip("&").replace("mut ", "").strip()
+        if "TreeNode" in bare:
+            return f"__judge::tree_to_json({expr})"
+        if "ListNode" in bare:
+            return f"__judge::list_to_json({expr})"
+        return f"serde_json::to_value({expr}).unwrap_or(serde_json::Value::Null)"
 
     def _parse_signature(self):
         pattern = f"fn\\s+{re.escape(self.function_name)}\\s*\\((.*?)\\)\\s*(?:->\\s*([^\\{{]+))?\\s*\\{{"
@@ -246,28 +266,40 @@ directory = "{self.VENDORED_SOURCE_DIR}"
     def _normalize_type(self, type_name: str) -> str:
         return " ".join(type_name.strip().split())
 
-    def _build_param_binding(self, type_name: str, param_name: str):
-        if type_name.startswith("&mut "):
+    def _build_param_binding(self, type_name: str, index: int, param_name: str, skip_pos: bool):
+        """Return (binding lines, argument expression, owned variable name if passed by &mut)."""
+        var = f"_a{index}"
+        value = f'__judge::pick(&payload, "{param_name}", {index}, {"true" if skip_pos else "false"})'
+
+        mutable = type_name.startswith("&mut ")
+        borrowed = type_name.startswith("&")
+        owned_type = type_name
+        if mutable:
             owned_type = self._resolve_owned_reference_target(type_name[5:].strip())
-            lines = [
-                f'let mut {param_name}_owned: {owned_type} = serde_json::from_value(j["{param_name}"].clone()).unwrap();'
-            ]
-            return lines, f"&mut {param_name}_owned"
-
-        if type_name.startswith("&"):
+        elif borrowed:
             owned_type = self._resolve_owned_reference_target(type_name[1:].strip())
-            lines = [
-                f'let {param_name}_owned: {owned_type} = serde_json::from_value(j["{param_name}"].clone()).unwrap();'
-            ]
-            return lines, f"&{param_name}_owned"
 
-        lines = [
-            f'let {param_name}: {type_name} = serde_json::from_value(j["{param_name}"].clone()).unwrap();'
-        ]
-        return lines, param_name
+        if "TreeNode" in owned_type:
+            expr = f"__judge::build_tree(&{value})"
+        elif "ListNode" in owned_type:
+            expr = f"__judge::build_list(&{value})"
+        else:
+            expr = (
+                f"serde_json::from_value::<{owned_type}>({value})"
+                f'.unwrap_or_else(|e| panic!("invalid argument {param_name}: {{}}", e))'
+            )
+
+        lines = [f"let mut {var}: {owned_type} = {expr};"]
+        if mutable:
+            return lines, f"&mut {var}", var
+        if borrowed:
+            return lines, f"&{var}", None
+        return lines, var, None
 
     def _resolve_owned_reference_target(self, borrowed_type: str) -> str:
         inner = borrowed_type.strip()
         if inner == "str":
             return "String"
+        if inner.startswith("[") and inner.endswith("]"):
+            return f"Vec<{inner[1:-1].strip()}>"
         return inner

@@ -80,6 +80,39 @@ async def _docker_is_running(container_id: str) -> bool:
     return stdout.decode().strip() == "true"
 
 
+_IMAGE_ID_CACHE_SECONDS = 30
+_image_ids: dict[str, tuple[str, float]] = {}
+
+
+async def _current_image_id(image: str) -> str | None:
+    cached = _image_ids.get(image)
+    if cached and time.time() - cached[1] < _IMAGE_ID_CACHE_SECONDS:
+        return cached[0]
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "image", "inspect", "--format", "{{.Id}}", image,
+        stdout=PIPE, stderr=DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    image_id = stdout.decode().strip() or None
+    if image_id:
+        _image_ids[image] = (image_id, time.time())
+    return image_id
+
+
+async def _container_is_usable(container_id: str, image: str) -> bool:
+    """Running, and started from the current build of the image (not one replaced by a deploy)."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "--format", "{{.State.Running}} {{.Image}}", container_id,
+        stdout=PIPE, stderr=DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    parts = stdout.decode().split()
+    if len(parts) != 2 or parts[0] != "true":
+        return False
+    current = await _current_image_id(image)
+    return current is None or parts[1] == current
+
+
 async def _sanitize(container_id: str) -> bool:
     """
     Kill all user processes inside the container and wipe /app in a single
@@ -143,11 +176,10 @@ async def acquire(image: str) -> dict | None:
             asyncio.create_task(_kill_container(entry["container_id"], entry.get("temp_dir")))
             continue
 
-        # Liveness check
-        if not await _docker_is_running(entry["container_id"]):
+        # Liveness check; also drops containers from an image a deploy has rebuilt
+        if not await _container_is_usable(entry["container_id"], image):
             metrics.docker_pool_events_total.labels(image, "dead_discard").inc()
-            if entry.get("temp_dir"):
-                shutil.rmtree(entry["temp_dir"], ignore_errors=True)
+            asyncio.create_task(_kill_container(entry["container_id"], entry.get("temp_dir")))
             continue
 
         # Containers are sanitized before they are pushed into the pool.

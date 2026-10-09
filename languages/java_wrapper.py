@@ -2,7 +2,12 @@ JAVA_WRAPPER_TEMPLATE = r"""
 import java.io.*;
 import java.lang.reflect.*;
 import java.util.*;
+import java.util.function.*;
+import java.util.stream.*;
+import java.math.BigInteger;
+import java.math.BigDecimal;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.core.type.TypeReference;
 
 // ==============================
@@ -13,13 +18,17 @@ class TreeNode {
     public int val;
     public TreeNode left;
     public TreeNode right;
+    TreeNode() {}
     TreeNode(int val) { this.val = val; }
+    TreeNode(int val, TreeNode left, TreeNode right) { this.val = val; this.left = left; this.right = right; }
 }
 
 class ListNode {
     public int val;
     public ListNode next;
+    ListNode() {}
     ListNode(int val) { this.val = val; }
+    ListNode(int val, ListNode next) { this.val = val; this.next = next; }
 }
 
 class Node {
@@ -181,6 +190,9 @@ class Builders {
 
 public class Main {
 
+    static final String RESULT_START = "__JUDGE_RESULT_7f3a__";
+    static final String RESULT_END = "__JUDGE_END_7f3a__";
+
     static ObjectMapper mapper = new ObjectMapper();
 
     public static Object autoConvertOutput(Object result) {
@@ -194,10 +206,39 @@ public class Main {
         if (result instanceof Node)
             return Builders.graphToAdjList((Node) result);
 
+        // Jackson would write char[] as one string and char as a number;
+        // LeetCode writes them as single-character strings.
+        if (result instanceof Character)
+            return String.valueOf((char) (Character) result);
+
+        if (result instanceof char[]) {
+            List<String> out = new ArrayList<>();
+            for (char c : (char[]) result) out.add(String.valueOf(c));
+            return out;
+        }
+
+        if (result instanceof Object[]) {
+            List<Object> out = new ArrayList<>();
+            for (Object o : (Object[]) result) out.add(autoConvertOutput(o));
+            return out;
+        }
+
+        if (result instanceof Collection) {
+            List<Object> out = new ArrayList<>();
+            for (Object o : (Collection<?>) result) out.add(autoConvertOutput(o));
+            return out;
+        }
+
         return result;
     }
 
-    public static Object convertValue(Object value, Class<?> targetType, Map<String,Object> fullInput) {
+    static char toChar(Object value) {
+        if (value instanceof Number) return (char) ((Number) value).intValue();
+        String s = value.toString();
+        return s.isEmpty() ? '\0' : s.charAt(0);
+    }
+
+    public static Object convertValue(Object value, Class<?> targetType, java.lang.reflect.Type genericType, Map<String,Object> fullInput) {
 
         if (value == null)
             return null;
@@ -214,16 +255,14 @@ public class Main {
         if (targetType == boolean.class || targetType == Boolean.class)
             return value;
 
+        if (targetType == char.class || targetType == Character.class)
+            return toChar(value);
+
         if (targetType == String.class)
             return value.toString();
 
-        // List<String> or List (raw) — pass through directly since Jackson
-        // already deserializes JSON arrays as ArrayList.  If the value is a
-        // plain String (multiline input format), split it into a List<String>.
-        if (targetType == List.class || targetType == ArrayList.class) {
-            if (value instanceof List)
-                return value;
-            // Multiline string format: "N\nOP1\nOP2\n..." — strip count line and split
+        // List<String> or List (raw) given as a multiline string: "N\nOP1\nOP2\n..."
+        if ((targetType == List.class || targetType == ArrayList.class) && !(value instanceof List)) {
             String s = value.toString().trim();
             String[] lines = s.split("\\n");
             int start = 0;
@@ -234,23 +273,19 @@ public class Main {
             return list;
         }
 
-        if (targetType == int[].class) {
+        if (targetType == char[].class) {
+            if (!(value instanceof List)) return value.toString().toCharArray();
             List<?> list = (List<?>) value;
-            int[] arr = new int[list.size()];
-            for (int i = 0; i < list.size(); i++)
-                arr[i] = ((Number) list.get(i)).intValue();
+            char[] arr = new char[list.size()];
+            for (int i = 0; i < list.size(); i++) arr[i] = toChar(list.get(i));
             return arr;
         }
 
-        if (targetType == int[][].class) {
+        if (targetType == char[][].class) {
             List<?> outer = (List<?>) value;
-            int[][] arr = new int[outer.size()][];
-            for (int i = 0; i < outer.size(); i++) {
-                List<?> inner = (List<?>) outer.get(i);
-                arr[i] = new int[inner.size()];
-                for (int j = 0; j < inner.size(); j++)
-                    arr[i][j] = ((Number) inner.get(j)).intValue();
-            }
+            char[][] arr = new char[outer.size()][];
+            for (int i = 0; i < outer.size(); i++)
+                arr[i] = (char[]) convertValue(outer.get(i), char[].class, char[].class, fullInput);
             return arr;
         }
 
@@ -267,68 +302,76 @@ public class Main {
         if (targetType == Node.class)
             return Builders.buildGraph((List<List<Integer>>) value);
 
-        return value;
+        // Everything else (int[], long[][], String[], List<List<Integer>>,
+        // Map<String, Integer>, ...) is converted by Jackson using the full
+        // generic parameter type.
+        JavaType javaType = mapper.getTypeFactory().constructType(genericType);
+        return mapper.convertValue(value, javaType);
     }
 
-    public static Object executeFunction(String functionName, Map<String, Object> input) throws Exception {
+    static String describe(Throwable t) {
+        String name = t.getClass().getSimpleName();
+        return t.getMessage() == null ? name : name + ": " + t.getMessage();
+    }
 
+    public static Map<String, Object> executeFunction(String functionName, Map<String, Object> input) throws Exception {
+
+        Class<?> solutionClass;
         try {
-            Class<?> solutionClass = Class.forName("Solution");
-            Object instance = solutionClass.getDeclaredConstructor().newInstance();
-
-            for (Method method : solutionClass.getDeclaredMethods()) {
-
-                if (!method.getName().equals(functionName))
-                    continue;
-
-                Class<?>[] paramTypes = method.getParameterTypes();
-                Object[] args = new Object[paramTypes.length];
-
-                List<Object> values = new ArrayList<>(input.values());
-
-                for (int i = 0; i < paramTypes.length; i++)
-                    args[i] = convertValue(values.get(i), paramTypes[i], input);
-
-                Object result = method.invoke(instance, args);
-                return autoConvertOutput(result);
-            }
-
-        } catch (InvocationTargetException e) {
-            throw new Exception(e.getTargetException().getMessage());
-        } catch (ClassNotFoundException ignored) {}
-
-        throw new Exception("Function '" + functionName + "' not found");
-    }
-
-    public static Object runSingle(Map<String, Object> payload) throws Exception {
-        String functionName = (String) payload.get("function_name");
-        Map<String, Object> input =
-            (Map<String, Object>) payload.get("input");
-
-        return executeFunction(functionName, input);
-    }
-
-    public static List<Object> runBatch(Map<String, Object> payload) throws Exception {
-        String functionName = (String) payload.get("function_name");
-        List<Map<String, Object>> testCases =
-            (List<Map<String, Object>>) payload.get("test_cases");
-
-        List<Object> results = new ArrayList<>();
-        for (int i = 0; i < testCases.size(); i++) {
-            try {
-                Map<String, Object> input =
-                    (Map<String, Object>) testCases.get(i).get("input");
-                results.add(executeFunction(functionName, input));
-            } catch (Exception e) {
-                throw new RuntimeException(i + ":" + e.getMessage());
-            }
+            solutionClass = Class.forName("Solution");
+        } catch (ClassNotFoundException e) {
+            throw new Exception("Class 'Solution' not found");
         }
 
-        return results;
+        // "pos" only describes a linked-list cycle; it is not an argument
+        // unless the method actually takes one more parameter.
+        List<Object> values = new ArrayList<>();
+        for (Map.Entry<String, Object> entry : input.entrySet())
+            if (!entry.getKey().equals("pos"))
+                values.add(entry.getValue());
+
+        Method method = null;
+        for (Method m : solutionClass.getDeclaredMethods()) {
+            if (!m.getName().equals(functionName)) continue;
+            if (method == null || m.getParameterCount() == values.size()) method = m;
+        }
+        if (method == null)
+            throw new Exception("Function '" + functionName + "' not found");
+        method.setAccessible(true);
+
+        if (method.getParameterCount() > values.size())
+            values = new ArrayList<>(input.values());
+
+        Class<?>[] paramTypes = method.getParameterTypes();
+        java.lang.reflect.Type[] genericTypes = method.getGenericParameterTypes();
+        Object[] args = new Object[paramTypes.length];
+        for (int i = 0; i < paramTypes.length; i++)
+            args[i] = convertValue(i < values.size() ? values.get(i) : null, paramTypes[i], genericTypes[i], input);
+
+        Object instance = solutionClass.getDeclaredConstructor().newInstance();
+        Object result;
+        try {
+            result = method.invoke(instance, args);
+        } catch (InvocationTargetException e) {
+            throw new Exception(describe(e.getTargetException()));
+        }
+
+        Map<String, Object> output = new HashMap<>();
+        output.put("result", autoConvertOutput(result));
+        if (method.getReturnType() == void.class && args.length > 0)
+            output.put("mutated", autoConvertOutput(args[0]));
+        return output;
+    }
+
+    static void emit(Object obj) throws Exception {
+        System.out.flush();
+        System.out.println(RESULT_START + mapper.writeValueAsString(obj) + RESULT_END);
+        System.out.flush();
     }
 
     public static void main(String[] args) {
 
+        int index = 0;
         try {
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
@@ -342,28 +385,30 @@ public class Main {
                 mapper.readValue(inputBuilder.toString(),
                     new TypeReference<Map<String, Object>>() {});
 
-            Map<String, Object> response = new HashMap<>();
+            String functionName = (String) payload.get("function_name");
+
             if (payload.containsKey("test_cases")) {
-                response.put("results", runBatch(payload));
+                // Batch mode: one result block per test case, so a crash or
+                // timeout part-way through still tells the judge which failed.
+                List<Map<String, Object>> testCases =
+                    (List<Map<String, Object>>) payload.get("test_cases");
+                for (index = 0; index < testCases.size(); index++) {
+                    Map<String, Object> input = (Map<String, Object>) testCases.get(index).get("input");
+                    Map<String, Object> output = executeFunction(functionName, input);
+                    output.put("index", index);
+                    emit(output);
+                }
             } else {
-                response.put("result", runSingle(payload));
+                emit(executeFunction(functionName, (Map<String, Object>) payload.get("input")));
             }
 
-            System.out.println(mapper.writeValueAsString(response));
-
-        } catch (Exception e) {
+        } catch (Throwable e) {
 
             try {
                 Map<String, Object> error = new HashMap<>();
-                String message = e.getMessage();
-                if (message != null && message.matches("^\\d+:.*")) {
-                    int sep = message.indexOf(':');
-                    error.put("failed_test_case_index", Integer.parseInt(message.substring(0, sep)));
-                    error.put("error", message.substring(sep + 1));
-                } else {
-                    error.put("error", message);
-                }
-                System.out.println(mapper.writeValueAsString(error));
+                error.put("error", e instanceof Exception && e.getMessage() != null ? e.getMessage() : describe(e));
+                error.put("failed_test_case_index", index);
+                emit(error);
             } catch (Exception ignored) {}
 
             System.exit(1);

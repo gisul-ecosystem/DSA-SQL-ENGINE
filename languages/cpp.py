@@ -9,6 +9,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -24,11 +25,11 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
     CPP_COMPILE_OPT_LEVEL,
 )
 from .cpp_wrapper import CPP_WRAPPER_TEMPLATE
+from .c_signature import parse_signature
 
 PIPE = asyncio.subprocess.PIPE
 DEVNULL = asyncio.subprocess.DEVNULL
@@ -36,7 +37,6 @@ DEVNULL = asyncio.subprocess.DEVNULL
 
 class CppExecutor(BaseExecutor):
     IMAGE_NAME = "cpp-sandbox:latest"
-    _SUPPORTED_POINTER_TYPES = {"int*", "ListNode*", "TreeNode*"}
 
     def __init__(self, code: str, function_name: str):
         super().__init__(code, function_name)
@@ -115,31 +115,9 @@ class CppExecutor(BaseExecutor):
         if not self.container_id:
             raise RuntimeExecutionError("Container not initialized")
 
-        payload = json.dumps(test_input).encode()
+        payload = json.dumps({"keys": list(test_input), "values": list(test_input.values())}).encode()
         exec_cmd = ["docker", "exec", "-i", self.container_id, "./solution"]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        if len(stdout) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        stdout_str = stdout.decode()
-
-        if proc.returncode != 0:
-            raise RuntimeExecutionError(
-                stderr.decode().strip() or stdout_str.strip() or "Runtime error"
-            )
-
-        try:
-            return json.loads(stdout_str.strip())
-        except Exception:
-            raise RuntimeExecutionError("Invalid JSON output")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):
         if self.container_id:
@@ -150,140 +128,37 @@ class CppExecutor(BaseExecutor):
             await container_pool.release(self.IMAGE_NAME, cid, td, htd)
 
     def _generate_wrapper(self):
-        return_type, params = self._parse_signature()
+        sig = parse_signature(self.code, self.function_name)
 
-        param_deserialization = []
-        param_names = []
-
-        for idx, (param_type, param_name) in enumerate(params):
-            clean_type = param_type.replace("const", "").replace("&", "").strip()
-            clean_type = re.sub(r"\s*\*\s*", "*", clean_type)
-
-            # Use positional access so the JSON key name in test_cases.input
-            # doesn't need to match the C++ function parameter name — consistent
-            # with how Python/JS/Java wrappers dispatch by argument position.
-            # Store a const json& reference for clean repeated access.
-            ref_var = f"_arg{idx}"
-            param_deserialization.append(
-                f'const json& {ref_var} = std::next(j.items().begin(), {idx}).value();'
+        bindings = []
+        arg_names = []
+        for index, param in enumerate(sig.params):
+            # Declare a plain value; it binds to `T&`, `const T&` and `T` parameters.
+            value_type = re.sub(r"\bconst\b", "", param.type).replace("&", "").strip()
+            var = f"_a{index}"
+            bindings.append(
+                f'{value_type} {var} = judge::Arg<{value_type}>::get(_in.arg("{param.name}", {index}));'
             )
-            val_expr = ref_var
+            arg_names.append(var)
 
-            if clean_type == "int":
-                param_deserialization.append(f'int {param_name} = {val_expr}.get<int>();')
-            elif clean_type == "long long":
-                param_deserialization.append(f'long long {param_name} = {val_expr}.get<long long>();')
-            elif clean_type == "string":
-                param_deserialization.append(f'string {param_name} = {val_expr}.get<string>();')
-            elif clean_type == "int*":
-                param_deserialization.append(
-                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
-                )
-                param_deserialization.append(f'int* {param_name} = {param_name}_vec.data();')
-            elif clean_type == "vector<int>":
-                param_deserialization.append(
-                    f'vector<int> {param_name} = {val_expr}.get<vector<int>>();'
-                )
-            elif clean_type == "vector<string>":
-                # Accept both a JSON array of strings and a multiline string
-                # (LeetCode-style "N\nOP1\nOP2\n...") — normalise to vector<string>
-                param_deserialization.append(f'vector<string> {param_name};')
-                param_deserialization.append(f'if ({val_expr}.is_array()) {{')
-                param_deserialization.append(f'    {param_name} = {val_expr}.get<vector<string>>();')
-                param_deserialization.append(f'}} else {{')
-                param_deserialization.append(f'    string _raw = {val_expr}.get<string>();')
-                param_deserialization.append(f'    istringstream _iss(_raw);')
-                param_deserialization.append(f'    string _line;')
-                param_deserialization.append(f'    bool _first = true;')
-                param_deserialization.append(f'    while (getline(_iss, _line)) {{')
-                param_deserialization.append(f'        if (!_line.empty() && _line.back() == \'\\r\') _line.pop_back();')
-                param_deserialization.append(f'        if (_line.empty()) continue;')
-                param_deserialization.append(f'        if (_first) {{ _first = false;')
-                param_deserialization.append(f'            bool _isCount = true;')
-                param_deserialization.append(f'            for (char _c : _line) if (!isdigit(_c)) {{ _isCount = false; break; }}')
-                param_deserialization.append(f'            if (_isCount) continue;')
-                param_deserialization.append(f'        }}')
-                param_deserialization.append(f'        {param_name}.push_back(_line);')
-                param_deserialization.append(f'    }}')
-                param_deserialization.append(f'}}')
-            elif clean_type == "vector<vector<int>>":
-                param_deserialization.append(
-                    f'vector<vector<int>> {param_name} = {val_expr}.get<vector<vector<int>>>();'
-                )
-            elif clean_type == "ListNode*":
-                param_deserialization.append(
-                    f'vector<int> {param_name}_vec = {val_expr}.get<vector<int>>();'
-                )
-                param_deserialization.append(
-                    f'ListNode* {param_name} = buildLinkedList({param_name}_vec);'
-                )
-            elif clean_type == "TreeNode*":
-                param_deserialization.append(f'vector<optional<int>> {param_name}_vec;')
-                param_deserialization.append(f'for (auto& el : {val_expr}) {{')
-                param_deserialization.append(f'    if (el.is_null()) {param_name}_vec.push_back(nullopt);')
-                param_deserialization.append(f'    else {param_name}_vec.push_back(el.get<int>());')
-                param_deserialization.append('}')
-                param_deserialization.append(f'TreeNode* {param_name} = buildTree({param_name}_vec);')
-            else:
-                raise CompileError(self._unsupported_type_message(clean_type))
+        indent = "\n        "
+        setup = f"Solution _solution;{indent}" if sig.in_solution_class else ""
+        target = "_solution." if sig.in_solution_class else ""
+        call = f"{target}{self.function_name}({', '.join(arg_names)})"
 
-            param_names.append(param_name)
+        if sig.return_type.strip() == "void":
+            # In-place problems return nothing; the judge compares the mutated first argument.
+            lines = [f"{setup}{call};", '_output["result"] = nullptr;']
+            if arg_names:
+                lines.append(f'_output["mutated"] = judge::toJson({arg_names[0]});')
+        else:
+            lines = [f"{setup}auto _result = {call};", '_output["result"] = judge::toJson(_result);']
 
-        return_serialization = "output = result;"
-        if return_type == "ListNode*":
-            return_serialization = "output = serializeLinkedList(result);"
-        elif return_type == "TreeNode*":
-            return_serialization = "output = serializeTree(result);"
-
+        skip_pos = any("ListNode" in p.type for p in sig.params)
         return (
             CPP_WRAPPER_TEMPLATE
-            .replace(
-                "__FUNCTION_SIGNATURE_PLACEHOLDER__",
-                f"{return_type} {self.function_name}({', '.join([f'{t} {n}' for t, n in params])});",
-            )
-            .replace(
-                "__PARAMETER_DESERIALIZATION_PLACEHOLDER__",
-                "\n        ".join(param_deserialization),
-            )
-            .replace("__FUNCTION_NAME_PLACEHOLDER__", self.function_name)
-            .replace("__FUNCTION_ARGUMENT_LIST_PLACEHOLDER__", ", ".join(param_names))
-            .replace("__RETURN_SERIALIZATION_PLACEHOLDER__", return_serialization)
             .replace("__USER_CODE_PLACEHOLDER__", self.code)
+            .replace("__SKIP_POS_PLACEHOLDER__", "true" if skip_pos else "false")
+            .replace("__PARAMETER_DESERIALIZATION_PLACEHOLDER__", indent.join(bindings))
+            .replace("__CALL_AND_SERIALIZE_PLACEHOLDER__", indent.join(lines))
         )
-
-    def _parse_signature(self):
-        pattern = rf'([^\s]+(?:\s*\*?)?)\s+{self.function_name}\s*\((.*?)\)'
-        match = re.search(pattern, self.code, re.DOTALL)
-        if not match:
-            raise CompileError("Could not parse function signature")
-
-        return_type = match.group(1).strip()
-        params_str = match.group(2).strip()
-        params = []
-
-        if params_str:
-            raw_params = [p.strip() for p in params_str.split(",")]
-            for raw_param in raw_params:
-                parts = raw_param.split()
-                raw_name = parts[-1]
-                pointer_prefix = ""
-                while raw_name.startswith("*"):
-                    pointer_prefix += "*"
-                    raw_name = raw_name[1:]
-                param_name = raw_name.replace("&", "").replace("*", "")
-                param_type = " ".join(parts[:-1]).strip()
-                if pointer_prefix:
-                    param_type = f"{param_type}{pointer_prefix}"
-                params.append((param_type.strip(), param_name.strip()))
-
-        return return_type, params
-
-    def _unsupported_type_message(self, clean_type: str) -> str:
-        if clean_type.endswith("*") and clean_type not in self._SUPPORTED_POINTER_TYPES:
-            base_type = clean_type[:-1].strip()
-            return (
-                f"Unsupported type: {clean_type}. "
-                f"For linked list problems, use ListNode* instead of {base_type}* "
-                f"and access node values with val/next."
-            )
-        return f"Unsupported type: {clean_type}"

@@ -10,6 +10,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -25,7 +26,6 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
 )
 from .go_wrapper import GO_WRAPPER_TEMPLATE
@@ -111,33 +111,9 @@ class GoExecutor(BaseExecutor):
         if not self.container_id:
             raise RuntimeExecutionError("Container not initialized")
 
-        payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
+        payload = json.dumps({"function_name": self.function_name, "input": test_input, "keys": list(test_input)}).encode()
         exec_cmd = ["docker", "exec", "-i", self.container_id, "./main"]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                message = json.loads(stdout_str).get("error", "Runtime error")
-            except Exception:
-                message = stderr.decode() or "Runtime error"
-            raise RuntimeExecutionError(message)
-
-        try:
-            return json.loads(stdout_str)["result"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid output format")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):
         if self.container_id:
@@ -152,13 +128,15 @@ class GoExecutor(BaseExecutor):
         params = self._parse_params(signature["params"])
         returns = self._parse_returns(signature["returns"])
 
+        skip_pos = any(self._is_listnode_type(t) for _, t in params)
         param_lines = []
-        for param_name, param_type in params:
+        for idx, (param_name, param_type) in enumerate(params):
+            lookup = f'pickArg(input, keys, "{param_name}", {idx}, {"true" if skip_pos else "false"})'
             if self._is_listnode_type(param_type):
                 if self._is_pointer_type(param_type):
                     param_lines.extend(
                         [
-                            f'    raw_{param_name}, ok := input["{param_name}"]',
+                            f'    raw_{param_name}, ok := {lookup}',
                             f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
                             f'    var {param_name}_arr []int',
                             f'    if err := json.Unmarshal(raw_{param_name}, &{param_name}_arr); err != nil {{',
@@ -177,7 +155,7 @@ class GoExecutor(BaseExecutor):
                 else:
                     param_lines.extend(
                         [
-                            f'    raw_{param_name}, ok := input["{param_name}"]',
+                            f'    raw_{param_name}, ok := {lookup}',
                             f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
                             f'    var {param_name}_arr []int',
                             f'    if err := json.Unmarshal(raw_{param_name}, &{param_name}_arr); err != nil {{',
@@ -201,7 +179,7 @@ class GoExecutor(BaseExecutor):
                 if self._is_pointer_type(param_type):
                     param_lines.extend(
                         [
-                            f'    raw_{param_name}, ok := input["{param_name}"]',
+                            f'    raw_{param_name}, ok := {lookup}',
                             f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
                             f'    var {param_name}_arr []interface{{}}',
                             f'    if err := json.Unmarshal(raw_{param_name}, &{param_name}_arr); err != nil {{',
@@ -214,7 +192,7 @@ class GoExecutor(BaseExecutor):
                 else:
                     param_lines.extend(
                         [
-                            f'    raw_{param_name}, ok := input["{param_name}"]',
+                            f'    raw_{param_name}, ok := {lookup}',
                             f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
                             f'    var {param_name}_arr []interface{{}}',
                             f'    if err := json.Unmarshal(raw_{param_name}, &{param_name}_arr); err != nil {{',
@@ -232,7 +210,7 @@ class GoExecutor(BaseExecutor):
                 if self._is_pointer_type(param_type):
                     param_lines.extend(
                         [
-                            f'    raw_{param_name}, ok := input["{param_name}"]',
+                            f'    raw_{param_name}, ok := {lookup}',
                             f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
                             f'    var {param_name}_adj [][]int',
                             f'    if err := json.Unmarshal(raw_{param_name}, &{param_name}_adj); err != nil {{',
@@ -244,11 +222,24 @@ class GoExecutor(BaseExecutor):
                     )
                 else:
                     raise CompileError("Go graph node parameters must be pointers")
+            elif self._normalize_type(param_type) in self._BYTE_DECODERS:
+                decoder = self._BYTE_DECODERS[self._normalize_type(param_type)]
+                param_lines.extend(
+                    [
+                        f'    raw_{param_name}, ok := {lookup}',
+                        f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
+                        f'    {param_name}, err_{param_name} := {decoder}(raw_{param_name})',
+                        f'    if err_{param_name} != nil {{',
+                        f'        return nil, fmt.Errorf("invalid parameter {param_name}: %w", err_{param_name})',
+                        "    }",
+                        "",
+                    ]
+                )
             else:
                 go_type = self._normalize_type(param_type)
                 param_lines.extend(
                     [
-                        f'    raw_{param_name}, ok := input["{param_name}"]',
+                        f'    raw_{param_name}, ok := {lookup}',
                         f'    if !ok {{ return nil, fmt.Errorf("missing parameter: {param_name}") }}',
                         f"    var {param_name} {go_type}",
                         f'    if err := json.Unmarshal(raw_{param_name}, &{param_name}); err != nil {{',
@@ -259,11 +250,15 @@ class GoExecutor(BaseExecutor):
                 )
 
         invocation_args = ", ".join(param_name for param_name, _ in params)
-        call_lines = self._build_call_lines(invocation_args, returns)
+        first_param = params[0][0] if params else None
+        call_lines = self._build_call_lines(invocation_args, returns, first_param)
+
+        user_imports, body = self._split_imports(self.code)
 
         return (
             GO_WRAPPER_TEMPLATE
-            .replace("{source_code}", self.code)
+            .replace("__IMPORTS_PLACEHOLDER__", self._merge_imports(user_imports))
+            .replace("{source_code}", body)
             .replace("__PARAM_BINDINGS_PLACEHOLDER__", "\n".join(param_lines).rstrip())
             .replace("__INVOKER_SETUP_PLACEHOLDER__", "")
             .replace("__CALL_PLACEHOLDER__", call_lines)
@@ -374,14 +369,55 @@ class GoExecutor(BaseExecutor):
     def _is_graph_node_type(self, type_name: str) -> bool:
         return self._strip_pointer(type_name) == "Node"
 
-    def _build_call_lines(self, invocation_args: str, returns: List[str]) -> str:
+    _BYTE_DECODERS = {
+        "byte": "decodeByte",
+        "[]byte": "decodeBytes",
+        "[][]byte": "decodeByteGrid",
+    }
+
+    _WRAPPER_IMPORTS = ["encoding/json", "fmt", "io", "os", "reflect", "runtime/debug", "sort", "strings"]
+
+    def _split_imports(self, code: str) -> Tuple[List[str], str]:
+        """Pull `import` declarations out of the user code (Go requires them first)."""
+        imports: List[str] = []
+
+        def take_block(match):
+            for line in match.group(1).splitlines():
+                line = line.split("//", 1)[0].strip()
+                if line:
+                    imports.append(line)
+            return ""
+
+        code = re.sub(r"^\s*package\s+\w+\s*$", "", code, flags=re.MULTILINE)
+        code = re.sub(r"^\s*import\s*\((.*?)\)", take_block, code, flags=re.MULTILINE | re.DOTALL)
+
+        def take_single(match):
+            imports.append(match.group(1).strip())
+            return ""
+
+        code = re.sub(r"^\s*import\s+([^\n(]+)$", take_single, code, flags=re.MULTILINE)
+        return imports, code
+
+    def _merge_imports(self, user_imports: List[str]) -> str:
+        specs = [f'"{path}"' for path in self._WRAPPER_IMPORTS]
+        for spec in user_imports:
+            if spec not in specs:
+                specs.append(spec)
+        return "import (\n" + "".join(f"    {spec}\n" for spec in specs) + ")"
+
+    def _build_call_lines(self, invocation_args: str, returns: List[str], first_param: str | None) -> str:
         if not returns:
-            return f"    {self.function_name}({invocation_args})\n    return nil, nil"
+            # In-place problems return nothing; the judge compares the mutated first argument.
+            mutated = f', "mutated": autoConvertOutput({first_param})' if first_param else ""
+            return (
+                f"    {self.function_name}({invocation_args})\n"
+                f'    return map[string]interface{{}}{{"result": nil{mutated}}}, nil'
+            )
 
         if len(returns) != 1:
             raise CompileError("Multiple Go return values are not supported")
 
         return (
             f"    result := {self.function_name}({invocation_args})\n"
-            "    return autoConvertOutput(result), nil"
+            '    return map[string]interface{}{"result": autoConvertOutput(result)}, nil'
         )

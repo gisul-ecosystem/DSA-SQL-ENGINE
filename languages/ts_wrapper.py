@@ -235,30 +235,47 @@ function autoConvertOutput(result: any): any {
 // Execution Logic
 // ==============================
 
+const RESULT_START = "__JUDGE_RESULT_7f3a__";
+const RESULT_END = "__JUDGE_END_7f3a__";
+
+function resolveFunction(functionName: string): any {
+    // Prefer a top-level function the user wrote; ignore built-ins like parseInt.
+    let fn: any;
+    try { fn = eval(functionName); } catch (_) { fn = undefined; }
+    if (typeof fn === "function" && !/\\[native code\\]/.test(Function.prototype.toString.call(fn))) {
+        return fn;
+    }
+
+    let SolutionClass: any;
+    try { SolutionClass = eval("Solution"); } catch (_) { SolutionClass = undefined; }
+    if (typeof SolutionClass === "function") {
+        const instance = new SolutionClass();
+        if (typeof instance[functionName] === "function") {
+            return instance[functionName].bind(instance);
+        }
+    }
+    return null;
+}
+
 function executeFunction(functionName: string, input: Record<string, any>): any {
 
     const convertedInput = autoConvertInput(input);
+    const fn = resolveFunction(functionName);
+    if (!fn) throw new Error("Function '" + functionName + "' not found");
 
-    try {
-        const func = eval(functionName);
-        if (typeof func === "function") {
-            const result = func(...Object.values(convertedInput));
-            return autoConvertOutput(result);
-        }
-    } catch (_) {}
+    const args = Object.values(convertedInput);
+    const result = fn(...args);
+    const output: any = { result: autoConvertOutput(result) };
+    if (result === undefined && args.length > 0) {
+        // In-place problems return nothing; the judge compares the mutated first argument.
+        output.mutated = autoConvertOutput(args[0]);
+    }
+    if (output.result === undefined) output.result = null;
+    return output;
+}
 
-    try {
-        const SolutionClass = eval("Solution");
-        if (typeof SolutionClass === "function") {
-            const instance = new SolutionClass();
-            if (typeof instance[functionName] === "function") {
-                const result = instance[functionName](...Object.values(convertedInput));
-                return autoConvertOutput(result);
-            }
-        }
-    } catch (_) {}
-
-    throw new Error("Function '" + functionName + "' not found");
+function emit(obj: any): void {
+    process.stdout.write(RESULT_START + JSON.stringify(obj) + RESULT_END + "\\n");
 }
 
 // ==============================
@@ -277,17 +294,11 @@ function main() {
             const rawInput = inputChunks.join("");
             const payload = JSON.parse(rawInput);
 
-            const functionName = payload.function_name;
-            const testInput = payload.input;
-
-            const result = executeFunction(functionName, testInput);
-
-            console.log(JSON.stringify({ result }));
+            emit(executeFunction(payload.function_name, payload.input));
         } catch (err: any) {
-            console.log(JSON.stringify({
-                error: err?.message || "Runtime error"
-            }));
-            process.exit(1);
+            const message = err instanceof Error ? err.name + ": " + err.message : String(err);
+            emit({ error: message });
+            process.exitCode = 1;
         }
     });
 }

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Literal, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 
 # -------------------------
@@ -47,6 +47,12 @@ class ExecuteRequest(StrictBaseModel):
         min_length=1,
         max_length=20,
     )
+
+    # Whether a function that returns nothing is judged on its mutated first
+    # argument (LeetCode in-place problems such as moveZeroes). None: decide
+    # from the code (void/Unit/() in typed languages, a None/undefined return
+    # in Python/JS/TS). Callers that know the problem's return type should set it.
+    in_place: Optional[bool] = None
 
 
 # -------------------------

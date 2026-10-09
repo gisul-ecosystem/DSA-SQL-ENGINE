@@ -8,6 +8,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -22,7 +23,6 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
 )
 from .js_wrapper import JS_WRAPPER_TEMPLATE
@@ -81,37 +81,22 @@ class JavaScriptExecutor(BaseExecutor):
         with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(wrapped_code)
 
+        # Report syntax errors as compilation errors, like the compiled languages.
+        check = await asyncio.create_subprocess_exec(
+            "docker", "exec", self.container_id, "node", "--check", "main.js",
+            stdout=PIPE, stderr=PIPE,
+        )
+        _, check_err = await check.communicate()
+        if check.returncode != 0:
+            raise CompileError(check_err.decode(errors="replace").strip()[:1000] or "Syntax error")
+
     async def run(self, test_input: dict):
         if not self.container_id:
             raise RuntimeExecutionError("Container not initialized")
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
         exec_cmd = ["docker", "exec", "-i", self.container_id, "node", "main.js"]
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                message = json.loads(stdout_str).get("error", "Runtime error")
-            except Exception:
-                message = stderr.decode() or "Runtime error"
-            raise RuntimeExecutionError(message)
-
-        try:
-            return json.loads(stdout_str)["result"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid output format")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):
         if self.container_id:

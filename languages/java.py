@@ -8,6 +8,7 @@ from execution.exceptions import (
     CompileError,
     RuntimeExecutionError,
 )
+from execution.process import run_wrapper, run_batch_wrapper
 from execution.sandbox_paths import (
     build_host_temp_dir,
     get_sandbox_roots,
@@ -23,7 +24,6 @@ from config.limits import (
     DOCKER_CPU_LIMIT,
     DOCKER_PIDS_LIMIT,
     DOCKER_NOFILE_LIMIT,
-    MAX_STDOUT_BYTES,
     CONTAINER_SLEEP_CMD,
 )
 from .java_wrapper import JAVA_WRAPPER_TEMPLATE
@@ -67,12 +67,6 @@ def _strip_java_preamble(code: str) -> str:
         result = "class Solution {\n" + result + "\n}"
 
     return result
-
-class JavaBatchRuntimeError(RuntimeExecutionError):
-    def __init__(self, message: str, failed_test_case_index: int | None = None):
-        super().__init__(message)
-        self.failed_test_case_index = failed_test_case_index
-
 
 class JavaExecutor(BaseExecutor):
     IMAGE_NAME = "java-sandbox:latest"
@@ -151,31 +145,7 @@ class JavaExecutor(BaseExecutor):
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
         exec_cmd = self._java_exec_cmd()
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=EXECUTION_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise RuntimeExecutionError("Execution timed out")
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                message = json.loads(stdout_str).get("error", "Runtime error")
-            except Exception:
-                message = stderr.decode() or "Runtime error"
-            raise RuntimeExecutionError(message)
-
-        try:
-            return json.loads(stdout_str)["result"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid output format")
+        return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def run_batch(self, test_cases: list[dict]):
         if not self.container_id:
@@ -185,36 +155,8 @@ class JavaExecutor(BaseExecutor):
             "function_name": self.function_name,
             "test_cases": [{"input": tc["input"]} for tc in test_cases],
         }).encode()
-        exec_cmd = self._java_exec_cmd()
-
-        proc = await asyncio.create_subprocess_exec(*exec_cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
         timeout = max(EXECUTION_TIMEOUT_SECONDS, EXECUTION_TIMEOUT_SECONDS * len(test_cases))
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise JavaBatchRuntimeError("Execution timed out", 0)
-
-        stdout_str = stdout.decode()
-
-        if len(stdout_str.encode("utf-8")) > MAX_STDOUT_BYTES:
-            raise RuntimeExecutionError("Output limit exceeded")
-
-        if proc.returncode != 0:
-            try:
-                response = json.loads(stdout_str)
-                message = response.get("error", "Runtime error")
-                failed_index = response.get("failed_test_case_index")
-            except Exception:
-                message = stderr.decode() or "Runtime error"
-                failed_index = None
-            raise JavaBatchRuntimeError(message, failed_index)
-
-        try:
-            return json.loads(stdout_str)["results"]
-        except Exception:
-            raise RuntimeExecutionError("Invalid output format")
+        return await run_batch_wrapper(self._java_exec_cmd(), payload, timeout, len(test_cases))
 
     async def cleanup(self):
         if self.container_id:
@@ -228,7 +170,7 @@ class JavaExecutor(BaseExecutor):
         return [
             "docker", "exec", "-i", self.container_id,
             "java",
-            "-Xms16m", "-Xmx256m",
+            "-Xms16m", "-Xmx256m", "-Xss256m",
             "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1",
             "-cp", ".:/opt/libs/*",
             "Main",
