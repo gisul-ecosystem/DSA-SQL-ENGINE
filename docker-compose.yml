@@ -39,7 +39,8 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      # CMD-SHELL (one string): Podman 4.x splits CMD-form test arguments on spaces.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()\""]
       interval: 10s
       timeout: 6s
       retries: 6
@@ -82,7 +83,8 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=5).read()"]
+      # CMD-SHELL (one string): Podman 4.x splits CMD-form test arguments on spaces.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=5).read()\""]
       interval: 10s
       timeout: 6s
       retries: 6

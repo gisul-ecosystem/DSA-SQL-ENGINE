@@ -102,6 +102,21 @@ the Docker socket through the `docker` group.
    sudo podman info --format '{{.Host.NetworkBackend}}'
    ```
 
+6. **If UFW (or another host firewall) is active, let containers reach their
+   DNS server.** Podman's DNS (`aardvark-dns`) listens on each Podman bridge's
+   gateway (`10.89.x.1:53`), which the firewall sees as traffic *into* the host,
+   and UFW's default `INPUT DROP` blocks it: containers then cannot resolve
+   each other (`redis`, `penpot-backend`, ...). Docker never hit this because its
+   DNS runs inside each container. Allow just that:
+
+   ```bash
+   sudo ufw allow from 10.89.0.0/16 to any port 53 proto udp comment 'podman container DNS'
+   sudo ufw allow from 10.89.0.0/16 to any port 53 proto tcp comment 'podman container DNS'
+   ```
+
+Docker and Podman can run side by side on one server (other stacks there can
+stay on Docker); only the ports must not overlap.
+
 Images are referenced with their full registry name (`docker.io/...`) because
 Podman does not assume Docker Hub for short names.
 
@@ -110,8 +125,13 @@ when its Dockerfile has a `HEALTHCHECK`: Podman's default OCI format drops it,
 and `podman inspect -f '{{.State.Health.Status}}'` then fails. Images built by
 Docker on GitHub keep it.
 
-These steps were tested on rootful Podman 5.8 (Fedora), including a reboot:
-the deploy user keeps socket access and `restart:` containers come back.
+Compose health checks use the `CMD-SHELL` form whenever the command has
+spaces in its arguments: Podman 4.x splits `["CMD", "python", "-c", "import x; ..."]`
+on spaces, so the check fails and the container shows as unhealthy.
+
+These steps were tested on rootful Podman 5.8 (Fedora), including a reboot,
+and used on the production server 103.99.38.225 (Ubuntu 24.04, Podman 4.9.3,
+Docker still running other stacks).
 
 ## Switching a server from Docker (once)
 
