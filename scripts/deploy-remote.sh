@@ -29,9 +29,13 @@ fi
 mkdir -p "${DEPLOY_PATH}"
 cd "${DEPLOY_PATH}"
 
-# The live sandbox mount contains root-owned temp dirs; keep it out of the
-# sandbox image build context or `podman build .` fails with "can't stat".
-printf 'sandbox\n.env\n' > .dockerignore
+# The sandbox images only need docker/. Build them from a context holding just
+# that folder: the deploy directory can contain root-owned sandbox temp dirs,
+# and the Podman client reads the whole context (even paths .dockerignore
+# excludes), so `podman build .` there fails with "permission denied".
+BUILD_CTX="$(mktemp -d)"
+trap 'rm -rf "${BUILD_CTX}"' EXIT
+cp -r docker "${BUILD_CTX}/docker"
 
 echo "${DOCKERHUB_TOKEN}" | podman login docker.io -u "${DOCKERHUB_USERNAME}" --password-stdin
 podman pull "${IMAGE}"
@@ -81,14 +85,14 @@ if ! podman image inspect go-sandbox:latest >/dev/null 2>&1; then go=1; fi
 if ! podman image inspect rust-sandbox:latest >/dev/null 2>&1; then rust=1; fi
 if ! podman image inspect csharp-sandbox:latest >/dev/null 2>&1; then csharp=1; fi
 
-if [[ "${python}" == "1" ]]; then podman build -t python-sandbox:latest -f docker/python.Dockerfile .; fi
-if [[ "${js}" == "1" ]]; then podman build -t js-sandbox:latest -f docker/js.Dockerfile .; fi
-if [[ "${java}" == "1" ]]; then podman build -t java-sandbox:latest -f docker/java.Dockerfile .; fi
-if [[ "${kotlin}" == "1" ]]; then podman build -t kotlin-sandbox:latest -f docker/kotlin.Dockerfile .; fi
-if [[ "${cpp}" == "1" ]]; then podman build -t cpp-sandbox:latest -f docker/cpp.Dockerfile .; fi
-if [[ "${go}" == "1" ]]; then podman build -t go-sandbox:latest -f docker/go.Dockerfile .; fi
-if [[ "${rust}" == "1" ]]; then podman build -t rust-sandbox:latest -f docker/rust.Dockerfile .; fi
-if [[ "${csharp}" == "1" ]]; then podman build -t csharp-sandbox:latest -f docker/csharp.Dockerfile .; fi
+if [[ "${python}" == "1" ]]; then podman build -t python-sandbox:latest -f "${BUILD_CTX}/docker/python.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${js}" == "1" ]]; then podman build -t js-sandbox:latest -f "${BUILD_CTX}/docker/js.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${java}" == "1" ]]; then podman build -t java-sandbox:latest -f "${BUILD_CTX}/docker/java.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${kotlin}" == "1" ]]; then podman build -t kotlin-sandbox:latest -f "${BUILD_CTX}/docker/kotlin.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${cpp}" == "1" ]]; then podman build -t cpp-sandbox:latest -f "${BUILD_CTX}/docker/cpp.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${go}" == "1" ]]; then podman build -t go-sandbox:latest -f "${BUILD_CTX}/docker/go.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${rust}" == "1" ]]; then podman build -t rust-sandbox:latest -f "${BUILD_CTX}/docker/rust.Dockerfile" "${BUILD_CTX}"; fi
+if [[ "${csharp}" == "1" ]]; then podman build -t csharp-sandbox:latest -f "${BUILD_CTX}/docker/csharp.Dockerfile" "${BUILD_CTX}"; fi
 
 for f in docker/python.Dockerfile docker/js.Dockerfile docker/java.Dockerfile \
          docker/kotlin.Dockerfile docker/cpp.Dockerfile docker/cpp_support.hpp \
