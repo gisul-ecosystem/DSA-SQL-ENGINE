@@ -1,7 +1,7 @@
 # -----------------------------
 # Base Image (Go 1.22 Alpine)
 # -----------------------------
-FROM golang:1.22-alpine
+FROM docker.io/library/golang:1.22-alpine
 
 # Install minimal tools
 RUN apk add --no-cache bash

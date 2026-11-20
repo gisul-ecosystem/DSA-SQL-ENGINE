@@ -1,14 +1,15 @@
 """
 Run every pattern in tests/patterns.py through the real ExecutionPipeline.
 
-Needs Redis, Docker and the sandbox images, the same as a worker. Example
-(Docker Desktop on Windows, from the repo root):
+Needs Redis, Podman and the sandbox images, the same as a worker. Example
+(rootful Podman on Linux, from the repo root):
 
-    docker run --rm --network judgetest \
-      -v //var/run/docker.sock:/var/run/docker.sock \
-      -v C:/judge-sandbox:/sandbox -v "$PWD":/app \
+    podman run --rm --network judgetest \
+      -v /run/podman/podman.sock:/run/podman/podman.sock \
+      -e CONTAINER_HOST=unix:///run/podman/podman.sock \
+      -v /srv/judge-sandbox:/sandbox -v "$PWD":/app \
       -e REDIS_URL=redis://judge-redis:6379/0 \
-      -e HOST_SANDBOX_ROOT=/run/desktop/mnt/host/c/judge-sandbox \
+      -e HOST_SANDBOX_ROOT=/srv/judge-sandbox \
       -e EXECUTION_TIMEOUT_SECONDS=4 \
       judge-local python tests/run_patterns.py [--lang cpp,go] [--pattern two_sum]
 

@@ -1,7 +1,7 @@
 # -----------------------------
 # Base Image (JDK 21)
 # -----------------------------
-FROM eclipse-temurin:21-jdk-jammy
+FROM docker.io/library/eclipse-temurin:21-jdk-jammy
 
 # -----------------------------
 # Create Non-Root User

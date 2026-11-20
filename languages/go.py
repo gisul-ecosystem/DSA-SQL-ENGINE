@@ -18,6 +18,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore, compile_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     COMPILATION_TIMEOUT_SECONDS,
@@ -57,7 +58,7 @@ class GoExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -91,7 +92,7 @@ class GoExecutor(BaseExecutor):
             f.write(wrapped_code)
 
         compile_cmd = [
-            "docker", "exec", "-e", "CGO_ENABLED=0", self.container_id,
+            CONTAINER_CLI, "exec", "-e", "CGO_ENABLED=0", self.container_id,
             "go", "build", "-buildvcs=false", "-o", "main", "main.go",
         ]
 
@@ -112,7 +113,7 @@ class GoExecutor(BaseExecutor):
             raise RuntimeExecutionError("Container not initialized")
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input, "keys": list(test_input)}).encode()
-        exec_cmd = ["docker", "exec", "-i", self.container_id, "./main"]
+        exec_cmd = [CONTAINER_CLI, "exec", "-i", self.container_id, "./main"]
         return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):

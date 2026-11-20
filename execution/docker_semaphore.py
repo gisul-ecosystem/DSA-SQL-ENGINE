@@ -5,7 +5,7 @@ Both use a Redis list as a counting semaphore shared across all worker processes
 - BRPOP to acquire a slot (blocks if none available)
 - LPUSH to release a slot
 
-docker_run_semaphore  — gates cold container spinups (docker run -d).
+docker_run_semaphore  — gates cold container spinups (podman run -d).
 compile_semaphore     — gates compiler invocations (g++, javac, rustc, etc.).
                         Limits concurrent compilers to ~CPU core count so each
                         compile gets meaningful CPU time instead of thrashing.

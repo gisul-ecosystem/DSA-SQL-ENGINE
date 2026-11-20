@@ -1,7 +1,7 @@
 # DSA Execution Engine
 
 Ephemeral code execution and judging API for DSA-style problems.  
-The service accepts user code + test cases, runs the code inside language-specific Docker sandboxes, and returns a verdict (`accepted`, `wrong_answer`, `runtime_error`, or `compilation_error`).
+The service accepts user code + test cases, runs the code inside language-specific Podman sandboxes, and returns a verdict (`accepted`, `wrong_answer`, `runtime_error`, or `compilation_error`).
 
 ## What This Project Does..
 
@@ -17,7 +17,7 @@ The service accepts user code + test cases, runs the code inside language-specif
   - `c`
   - `go`
   - `rust`
-- Runs each submission in an isolated Docker container with resource limits
+- Runs each submission in an isolated Podman container with resource limits
 - Compiles when needed, then executes against test cases one by one
 - Returns the first failing verdict early, or `accepted` if all pass
 
@@ -30,7 +30,7 @@ Clientt
       -> ExecutorFactory
         -> Language Executor (python/js/java/... etc)
           -> Wrapper Generation (inject user code)
-          -> Docker Sandbox (compile + run)
+          -> Podman Sandbox (compile + run)
       -> Verdict Builder
     -> JSON Response
 ```
@@ -71,11 +71,11 @@ Dockerfile           # API server image
    - Resolves sandbox paths (`CONTAINER_SANDBOX_ROOT`, `HOST_SANDBOX_ROOT`)
    - Creates temp workspace inside sandbox mount
    - Injects user code into a wrapper template
-   - Starts a sandbox container (`docker run -d ... sleep ...`)
+   - Starts a sandbox container (`podman run -d ... sleep ...`)
    - Runs language compile step if needed
 5. For each test case:
    - Pipeline calls `executor.run(test_input)`
-   - Executor sends JSON payload to process stdin via `docker exec -i`
+   - Executor sends JSON payload to process stdin via `podman exec -i`
    - Wrapper deserializes input, invokes target function/method, serializes output JSON
    - Pipeline compares returned output with `expected_output` using strict inequality (`!=`)
 6. Pipeline returns:
@@ -118,7 +118,7 @@ Status codes:
 Validation rules:
 
 - `language`: one of the supported literals listed above
-- `source_code`: required, `1..5000` chars
+- `source_code`: required, `1..50000` chars
 - `function_name`: required, `1..100` chars
 - `test_cases`: required, `1..20` items
 - each test case:
@@ -182,7 +182,7 @@ A test case ran longer than `EXECUTION_TIMEOUT_SECONDS`.
 
 #### Error
 
-The sandbox could not be prepared (container start, Docker daemon, configuration). Not a problem with the submitted code.
+The sandbox could not be prepared (container start, Podman service, configuration). Not a problem with the submitted code.
 
 ```json
 {
@@ -223,9 +223,10 @@ Pinned in `requirements.txt` (notable runtime packages):
 
 ### System Dependencies
 
-- Docker Engine (host)
-- Docker CLI available to the API process/container
-- Docker socket mount: `/var/run/docker.sock:/var/run/docker.sock`
+- Podman, rootful, on the host with its API socket enabled (`sudo systemctl enable --now podman.socket`); see `PODMAN.md`
+- Podman client in the API/worker image (installed by `Dockerfile`), pointed at the host with `CONTAINER_HOST=unix:///run/podman/podman.sock`
+- Podman socket mount: `/run/podman/podman.sock:/run/podman/podman.sock`
+- `CONTAINER_CLI` picks the CLI the engine runs (default `podman`)
 - Writable sandbox mount (default container path: `/sandbox`)
 - On Windows + WSL, `HOST_SANDBOX_ROOT` should be a native WSL/Linux path such as `/home/<user>/judge-sandbox`, not `/run/desktop/mnt/host/c/...`; the Windows-host mount path is significantly slower for compile-heavy languages like C++
 
@@ -245,29 +246,30 @@ Pinned in `requirements.txt` (notable runtime packages):
 ### 1. Build Sandbox Images
 
 ```bash
-docker build -t python-sandbox:latest -f docker/python.Dockerfile .
-docker build -t js-sandbox:latest -f docker/js.Dockerfile .
-docker build -t java-sandbox:latest -f docker/java.Dockerfile .
-docker build -t kotlin-sandbox:latest -f docker/kotlin.Dockerfile .
-docker build -t cpp-sandbox:latest -f docker/cpp.Dockerfile .
-docker build -t go-sandbox:latest -f docker/go.Dockerfile .
-docker build -t rust-sandbox:latest -f docker/rust.Dockerfile .
-docker build -t csharp-sandbox:latest -f docker/csharp.Dockerfile .
+podman build -t python-sandbox:latest -f docker/python.Dockerfile .
+podman build -t js-sandbox:latest -f docker/js.Dockerfile .
+podman build -t java-sandbox:latest -f docker/java.Dockerfile .
+podman build -t kotlin-sandbox:latest -f docker/kotlin.Dockerfile .
+podman build -t cpp-sandbox:latest -f docker/cpp.Dockerfile .
+podman build -t go-sandbox:latest -f docker/go.Dockerfile .
+podman build -t rust-sandbox:latest -f docker/rust.Dockerfile .
+podman build -t csharp-sandbox:latest -f docker/csharp.Dockerfile .
 ```
 
-### 2. Run API in Docker (Recommended)
+### 2. Run API in a container (Recommended)
 
 Build API image:
 
 ```bash
-docker build -t judge-api:latest .
+podman build -t judge-api:latest .
 ```
 
 Run (Linux/macOS example):
 
 ```bash
-docker run --rm -p 8900:8900 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
+podman run --rm -p 8900:8000 \
+  -v /run/podman/podman.sock:/run/podman/podman.sock \
+  -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   -v $(pwd)/sandbox:/sandbox \
   -e HOST_SANDBOX_ROOT=$(pwd)/sandbox \
   --name judge-api \
@@ -279,8 +281,9 @@ Run (WSL/native Linux path example):
 ```bash
 mkdir -p ~/judge-sandbox
 
-docker run --rm -p 8900:8900 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
+podman run --rm -p 8900:8000 \
+  -v /run/podman/podman.sock:/run/podman/podman.sock \
+  -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   -v ~/judge-sandbox:/sandbox \
   -e HOST_SANDBOX_ROOT=$HOME/judge-sandbox \
   --name judge-api \
@@ -294,12 +297,12 @@ pip install -r requirements.txt
 uvicorn api.main:app --host 0.0.0.0 --port 8900
 ```
 
-You still need Docker Engine running because executors call `docker run/exec/rm`.
+You still need the Podman service running because executors call `podman run/exec/rm` (set `CONTAINER_HOST=unix:///run/podman/podman.sock` when the host's Podman is rootful and you are not root).
 
 ## Environment Variables
 
 - `HOST_SANDBOX_ROOT` (required)
-  - Must be a Docker-daemon-visible Linux path
+  - Must be a Linux path visible to the Podman service on the host
   - On Windows + WSL, prefer a native WSL path such as `/home/<user>/judge-sandbox`
   - Avoid `/run/desktop/mnt/host/<drive>/...` for compile-heavy workloads; it is much slower than the WSL filesystem
 - `CONTAINER_SANDBOX_ROOT` (optional)
@@ -337,7 +340,7 @@ If `HOST_SANDBOX_ROOT` is missing, empty, or a Windows drive path (`C:\...`), ex
 
 ## Pattern Tests
 
-`tests/run_patterns.py` runs about 30 LeetCode-style patterns (scalars, arrays, strings, chars, 2D grids, trees, linked lists with cycles, in-place functions, imports, debug prints, recursion, and every failure verdict) in all 10 languages through the real pipeline. It needs Redis, Docker and the sandbox images, the same as a worker; see the docstring for the `docker run` command.
+`tests/run_patterns.py` runs about 30 LeetCode-style patterns (scalars, arrays, strings, chars, 2D grids, trees, linked lists with cycles, in-place functions, imports, debug prints, recursion, and every failure verdict) in all 10 languages through the real pipeline. It needs Redis, Podman and the sandbox images, the same as a worker; see the docstring for the `podman run` command.
 
 ## Sample cURL
 

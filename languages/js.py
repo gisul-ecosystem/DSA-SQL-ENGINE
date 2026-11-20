@@ -16,6 +16,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     DOCKER_MEMORY_LIMIT,
@@ -54,7 +55,7 @@ class JavaScriptExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -83,7 +84,7 @@ class JavaScriptExecutor(BaseExecutor):
 
         # Report syntax errors as compilation errors, like the compiled languages.
         check = await asyncio.create_subprocess_exec(
-            "docker", "exec", self.container_id, "node", "--check", "main.js",
+            CONTAINER_CLI, "exec", self.container_id, "node", "--check", "main.js",
             stdout=PIPE, stderr=PIPE,
         )
         _, check_err = await check.communicate()
@@ -95,7 +96,7 @@ class JavaScriptExecutor(BaseExecutor):
             raise RuntimeExecutionError("Container not initialized")
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
-        exec_cmd = ["docker", "exec", "-i", self.container_id, "node", "main.js"]
+        exec_cmd = [CONTAINER_CLI, "exec", "-i", self.container_id, "node", "main.js"]
         return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):

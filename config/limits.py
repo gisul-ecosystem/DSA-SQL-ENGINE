@@ -25,7 +25,13 @@ TS_COMPILE_TIMEOUT_SECONDS = _int_env("TS_COMPILE_TIMEOUT_SECONDS", 30)
 # How long the API waits for a queued job result before returning 504.
 QUEUE_RESULT_TIMEOUT_SECONDS = _int_env("QUEUE_RESULT_TIMEOUT_SECONDS", 900)
 
-# Docker resource limits
+# Container runtime CLI that starts and drives the sandbox containers. Podman
+# runs rootful on the host; inside the api/worker containers this CLI reaches
+# the host's Podman service through CONTAINER_HOST (see docker-compose.yml).
+CONTAINER_CLI = _str_env("CONTAINER_CLI", "podman")
+
+# Sandbox resource limits (the DOCKER_* names are kept so existing .env files
+# keep working).
 DOCKER_MEMORY_LIMIT = _str_env("DOCKER_MEMORY_LIMIT", "1024m")
 DOCKER_MEMORY_SWAP = _str_env("DOCKER_MEMORY_SWAP", "1024m")
 DOCKER_CPU_LIMIT = _str_env("DOCKER_CPU_LIMIT", "2")
@@ -53,7 +59,7 @@ WARM_CONTAINER_TTL_SECONDS = _int_env("WARM_CONTAINER_TTL_SECONDS", 60)
 WARM_POOL_MAX_PER_IMAGE = _int_env("WARM_POOL_MAX_PER_IMAGE", 50)
 CPP_PREWARM_TARGET = _int_env("CPP_PREWARM_TARGET", 1)
 
-# Max simultaneous docker run calls across all worker slots.
+# Max simultaneous sandbox container starts (podman run) across all worker slots.
 DOCKER_RUN_CONCURRENCY = _int_env("DOCKER_RUN_CONCURRENCY", 20)
 
 # Max simultaneous compiler invocations (g++, javac, rustc, etc.) across all worker slots.

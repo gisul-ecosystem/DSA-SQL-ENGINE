@@ -1,12 +1,20 @@
-FROM python:3.11-slim
+# Debian bookworm is pinned on purpose: its Podman 4.3 client works with the
+# Podman 4.x/5.x service on the host, while a newer client (Podman 5 on trixie)
+# refuses to talk to a Podman 4 host.
+FROM docker.io/library/python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install ONLY docker CLI (not full engine)
+# Only the Podman client is used: with CONTAINER_HOST set it drives the host's
+# rootful Podman service through the socket mounted by docker-compose.yml, and
+# never runs containers itself.
 RUN apt-get update && \
-    apt-get install -y docker-cli && \
+    apt-get install -y --no-install-recommends podman && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+ENV CONTAINER_CLI=podman \
+    CONTAINER_HOST=unix:///run/podman/podman.sock
 
 # Copy only requirements first (better layer caching)
 COPY requirements.txt .

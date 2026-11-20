@@ -17,6 +17,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore, compile_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     COMPILATION_TIMEOUT_SECONDS,
@@ -73,7 +74,7 @@ class CExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -113,7 +114,7 @@ class CExecutor(BaseExecutor):
             "gcc -std=gnu17 -O2 -include judge_prelude.h -c user.c -o user.o"
             f" && g++ -std=c++20 -pipe {CPP_COMPILE_OPT_LEVEL} solution.cpp user.o -o solution -lm"
         )
-        compile_cmd = ["docker", "exec", self.container_id, "sh", "-c", build]
+        compile_cmd = [CONTAINER_CLI, "exec", self.container_id, "sh", "-c", build]
 
         async with compile_semaphore():
             proc = await asyncio.create_subprocess_exec(*compile_cmd, stdout=PIPE, stderr=PIPE)
@@ -132,7 +133,7 @@ class CExecutor(BaseExecutor):
             raise RuntimeExecutionError("Container not initialized")
 
         payload = json.dumps({"keys": list(test_input), "values": list(test_input.values())}).encode()
-        exec_cmd = ["docker", "exec", "-i", self.container_id, "./solution"]
+        exec_cmd = [CONTAINER_CLI, "exec", "-i", self.container_id, "./solution"]
         return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def run_batch(self, test_cases: list[dict]):
@@ -145,7 +146,7 @@ class CExecutor(BaseExecutor):
                 for tc in test_cases
             ],
         }).encode()
-        exec_cmd = ["docker", "exec", "-i", self.container_id, "./solution"]
+        exec_cmd = [CONTAINER_CLI, "exec", "-i", self.container_id, "./solution"]
         timeout = max(EXECUTION_TIMEOUT_SECONDS, EXECUTION_TIMEOUT_SECONDS * len(test_cases))
         return await run_batch_wrapper(exec_cmd, payload, timeout, len(test_cases))
 

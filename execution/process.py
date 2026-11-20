@@ -26,7 +26,7 @@ RESULT_END = "__JUDGE_END_7f3a__"
 
 MAX_ERROR_MESSAGE_CHARS = 1000
 
-# Exit codes of a process killed by a signal, as reported by `docker exec`.
+# Exit codes of a process killed by a signal, as reported by `podman exec` (same as Docker).
 _SIGNAL_MESSAGES = {
     134: "Runtime error: aborted (SIGABRT)",
     136: "Runtime error: floating point exception (SIGFPE)",

@@ -29,7 +29,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
-      IMAGE: gisuldocker/execution-engine-py:latest
+      IMAGE: docker.io/gisuldocker/execution-engine-py:latest
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       SANDBOX_HOST_PATH: ${{ secrets.SANDBOX_HOST_PATH }}
       WORKER_SCALE: ${{ vars.WORKER_SCALE || '2' }}

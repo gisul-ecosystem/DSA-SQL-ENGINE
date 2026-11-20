@@ -1,4 +1,4 @@
-FROM rust:1.75-slim
+FROM docker.io/library/rust:1.75-slim
 
 WORKDIR /opt/cache
 

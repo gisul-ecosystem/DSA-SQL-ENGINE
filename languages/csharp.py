@@ -16,6 +16,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore, compile_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     COMPILATION_TIMEOUT_SECONDS,
@@ -71,7 +72,7 @@ class CSharpExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -97,7 +98,7 @@ class CSharpExecutor(BaseExecutor):
         os.makedirs(self.project_path, exist_ok=True)
 
         mkdir_proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", self.container_id,
+            CONTAINER_CLI, "exec", self.container_id,
             "mkdir", "-p", "/app/SandboxApp",
             stdout=DEVNULL, stderr=DEVNULL,
         )
@@ -125,7 +126,7 @@ class CSharpExecutor(BaseExecutor):
             f.write(csproj_content)
 
         compile_cmd = [
-            "docker", "exec", self.container_id,
+            CONTAINER_CLI, "exec", self.container_id,
             "dotnet", "build", "--configuration", "Release", "--nologo",
         ]
 
@@ -149,7 +150,7 @@ class CSharpExecutor(BaseExecutor):
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
         exec_cmd = [
-            "docker", "exec", "-i", self.container_id,
+            CONTAINER_CLI, "exec", "-i", self.container_id,
             "dotnet", "/app/SandboxApp/bin/Release/net8.0/SandboxApp.dll",
         ]
         return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)

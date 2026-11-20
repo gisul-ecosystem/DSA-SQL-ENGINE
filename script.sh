@@ -1,31 +1,22 @@
+# Handy commands (not run by CI). The engine uses rootful Podman: see PODMAN.md.
 
-docker_create_python_image= docker build -t python-sandbox:latest -f docker/python.Dockerfile .
+# Sandbox images (built on the host that runs the engine)
+podman build -t python-sandbox:latest -f docker/python.Dockerfile .
+podman build -t cpp-sandbox:latest -f docker/cpp.Dockerfile .
 
-docker_create_cpp_image = docker build -t cpp-sandbox:latest -f docker/cpp.Dockerfile .
+# API image
+podman build -t judge-api .
 
-docker_create_image_command= docker build -t judge-api .
+# API image for amd64, pushed to Docker Hub
+podman build --platform linux/amd64 -t docker.io/gisul/execution-engine-py:latest .
+podman push docker.io/gisul/execution-engine-py:latest
 
-# docker build command for amd64
-docker_build = docker buildx build --platform linux/amd64 -t gisul/execution-engine-py:latest --push .
-
-
-
-# for mac os
-docker_run_command=
-docker run \
-  -p 8900:8900 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v $(pwd)/sandbox:/sandbox \
-  -e HOST_SANDBOX_ROOT=$(pwd)/sandbox \
+# Run the API against the host's Podman service
+podman run \
+  -p 8900:8000 \
+  -v /run/podman/podman.sock:/run/podman/podman.sock \
+  -e CONTAINER_HOST=unix:///run/podman/podman.sock \
+  -v "$(pwd)/sandbox:/sandbox" \
+  -e HOST_SANDBOX_ROOT="$(pwd)/sandbox" \
   --name judge-api \
   judge-api
-
-
-# for windows
-docker_run_command = 
-docker run --rm -p 8900:8900 `
-   -v /var/run/docker.sock:/var/run/docker.sock `
-   -v C:\judge-sandbox:/sandbox `
-   -e HOST_SANDBOX_ROOT=/run/desktop/mnt/host/c/judge-sandbox `
-   --name judge-api `
-   gisul/execution-engine-py:latest
