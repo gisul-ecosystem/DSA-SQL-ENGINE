@@ -63,6 +63,20 @@ the Docker socket through the `docker` group.
    sudo systemctl enable --now podman-restart.service
    ```
 
+   On **Podman 4.x** (Ubuntu 24.04 ships 4.9) that service only restarts
+   `restart: always` containers; `unless-stopped` ones (several of these
+   stacks) stay down after a reboot. Podman 5 handles both. On 4.x add:
+
+   ```bash
+   sudo mkdir -p /etc/systemd/system/podman-restart.service.d
+   printf '[Service]\nExecStart=\nExecStart=/usr/bin/podman $LOGGING start --all --filter restart-policy=always\nExecStart=/usr/bin/podman $LOGGING start --all --filter restart-policy=unless-stopped\n' \
+     | sudo tee /etc/systemd/system/podman-restart.service.d/unless-stopped.conf
+   sudo systemctl daemon-reload
+   ```
+
+   Do not `systemctl restart podman-restart.service` on a running server: its
+   stop step stops every `restart: always` container first.
+
 4. **Let the deploy user use the root socket** (the equivalent of the `docker`
    group; like that group, access to this socket is root-equivalent):
 
