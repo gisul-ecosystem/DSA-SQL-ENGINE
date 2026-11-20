@@ -20,8 +20,8 @@ def get_sandbox_roots() -> tuple[str, str]:
 
     if WINDOWS_DRIVE_PATH.match(host_sandbox_root):
         raise RuntimeExecutionError(
-            "HOST_SANDBOX_ROOT must be a Docker-daemon-visible Linux path "
-            "(for Windows Docker Desktop use /run/desktop/mnt/host/<drive>/...)"
+            "HOST_SANDBOX_ROOT must be a Linux path visible to the Podman service "
+            "on the host, not a Windows drive path"
         )
 
     host_sandbox_root = host_sandbox_root.replace("\\", "/").rstrip("/")

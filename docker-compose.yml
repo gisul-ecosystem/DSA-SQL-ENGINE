@@ -1,7 +1,7 @@
 services:
 
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis:7-alpine
     restart: always
     command: redis-server --save "" --appendonly no --maxmemory 512mb --maxmemory-policy volatile-lru
     healthcheck:
@@ -9,14 +9,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    logging:
-      driver: json-file
-      options:
-        labels: service
 
   api:
     build: .
-    image: gisuldocker/execution-engine-py:latest
+    image: docker.io/gisuldocker/execution-engine-py:latest
     restart: always
     ports:
       - "${API_PORT:-8900}:8000"
@@ -27,11 +23,15 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - HOST_SANDBOX_ROOT=${HOST_SANDBOX_ROOT}
       - CONTAINER_SANDBOX_ROOT=/sandbox
+      - CONTAINER_CLI=podman
+      - CONTAINER_HOST=unix:///run/podman/podman.sock
       - QUEUE_RESULT_TIMEOUT_SECONDS=${QUEUE_RESULT_TIMEOUT_SECONDS:-900}
       - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-true}
       - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_multiproc
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootful Podman service on the host; the podman client in the image
+      # reaches it through CONTAINER_HOST.
+      - ${PODMAN_SOCKET:-/run/podman/podman.sock}:/run/podman/podman.sock
       - ${HOST_SANDBOX_ROOT}:/sandbox
     tmpfs:
       - /tmp/prometheus_multiproc
@@ -43,12 +43,14 @@ services:
       interval: 10s
       timeout: 6s
       retries: 6
+    security_opt:
+      - label=disable
     labels:
       service: execution-engine-api
 
   worker:
     build: .
-    image: gisuldocker/execution-engine-py:latest
+    image: docker.io/gisuldocker/execution-engine-py:latest
     restart: always
     command: python worker.py
     environment:
@@ -61,6 +63,8 @@ services:
       - WORKER_LANGUAGES=${WORKER_LANGUAGES:-python,javascript,c,java,kotlin,go,rust,typescript,cpp,csharp}
       - HOST_SANDBOX_ROOT=${HOST_SANDBOX_ROOT}
       - CONTAINER_SANDBOX_ROOT=/sandbox
+      - CONTAINER_CLI=podman
+      - CONTAINER_HOST=unix:///run/podman/podman.sock
       - OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED:-true}
       - EXECUTION_TIMEOUT_SECONDS=${EXECUTION_TIMEOUT_SECONDS:-10}
       - WARM_POOL_MAX_PER_IMAGE=${WARM_POOL_MAX_PER_IMAGE:-50}
@@ -70,7 +74,9 @@ services:
       - DOCKER_RUN_CONCURRENCY=${DOCKER_RUN_CONCURRENCY:-6}
       - COMPILE_CONCURRENCY=${COMPILE_CONCURRENCY:-3}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootful Podman service on the host; the podman client in the image
+      # reaches it through CONTAINER_HOST.
+      - ${PODMAN_SOCKET:-/run/podman/podman.sock}:/run/podman/podman.sock
       - ${HOST_SANDBOX_ROOT}:/sandbox
     depends_on:
       redis:
@@ -80,12 +86,14 @@ services:
       interval: 10s
       timeout: 6s
       retries: 6
+    security_opt:
+      - label=disable
     labels:
       service: execution-engine-worker
     # Scale workers up only after the single-request C++ latency is acceptable.
 
   prometheus:
-    image: prom/prometheus:v2.55.1
+    image: docker.io/prom/prometheus:v2.55.1
     restart: always
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -101,7 +109,7 @@ services:
       - worker
 
   grafana:
-    image: grafana/grafana:11.3.1
+    image: docker.io/grafana/grafana:11.3.1
     restart: always
     ports:
       - "8001:3000"

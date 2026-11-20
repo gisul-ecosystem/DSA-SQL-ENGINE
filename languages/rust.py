@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     COMPILATION_TIMEOUT_SECONDS,
     CONTAINER_SLEEP_CMD,
@@ -56,7 +57,7 @@ class RustExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -112,7 +113,7 @@ directory = "{self.VENDORED_SOURCE_DIR}"
             f.write(cargo_config)
 
         compile_cmd = [
-            "docker", "exec", self.container_id,
+            CONTAINER_CLI, "exec", self.container_id,
             "cargo", "build", "--release", "--offline",
             "--target-dir", self.SHARED_TARGET_DIR,
         ]
@@ -135,7 +136,7 @@ directory = "{self.VENDORED_SOURCE_DIR}"
 
         payload = json.dumps({"keys": list(test_input), "values": list(test_input.values())}).encode()
         exec_cmd = [
-            "docker", "exec", "-i", self.container_id,
+            CONTAINER_CLI, "exec", "-i", self.container_id,
             f"{self.SHARED_TARGET_DIR}/release/runner",
         ]
         return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)

@@ -16,6 +16,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     DOCKER_MEMORY_LIMIT,
@@ -59,7 +60,7 @@ class PythonExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -96,7 +97,7 @@ class PythonExecutor(BaseExecutor):
             raise RuntimeExecutionError("Container not initialized")
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
-        exec_cmd = ["docker", "exec", "-i", self.container_id, "python3", "main.py"]
+        exec_cmd = [CONTAINER_CLI, "exec", "-i", self.container_id, "python3", "main.py"]
         return await run_wrapper(exec_cmd, payload, EXECUTION_TIMEOUT_SECONDS)
 
     async def cleanup(self):

@@ -16,6 +16,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore, compile_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     COMPILATION_TIMEOUT_SECONDS,
@@ -69,7 +70,7 @@ class KotlinExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -103,7 +104,7 @@ class KotlinExecutor(BaseExecutor):
             f.write(wrapped_code)
 
         compile_cmd = [
-            "docker", "exec", self.container_id,
+            CONTAINER_CLI, "exec", self.container_id,
             "kotlinc", "Main.kt",
             "-cp", "/opt/libs/jackson-core.jar:/opt/libs/jackson-databind.jar:/opt/libs/jackson-annotations.jar",
             "-d", ".",
@@ -129,7 +130,7 @@ class KotlinExecutor(BaseExecutor):
 
         payload = json.dumps({"function_name": self.function_name, "input": test_input}).encode()
         exec_cmd = [
-            "docker", "exec", "-i", self.container_id,
+            CONTAINER_CLI, "exec", "-i", self.container_id,
             "java", "-Xms16m", "-Xmx256m", "-Xss256m",
             "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1",
             "-cp", ".:/opt/kotlinc/lib/kotlin-stdlib.jar:/opt/libs/jackson-core.jar:/opt/libs/jackson-databind.jar:/opt/libs/jackson-annotations.jar",

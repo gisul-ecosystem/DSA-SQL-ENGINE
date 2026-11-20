@@ -19,6 +19,7 @@ import time
 
 from jobqueue.redis_client import get_redis
 from jobqueue.job import queue_depth
+from config.limits import CONTAINER_CLI
 from config.limits import (
     WARM_CONTAINER_TTL_SECONDS,
     WARM_POOL_MAX_PER_IMAGE,
@@ -73,7 +74,7 @@ def _pool_key(image: str) -> str:
 async def _docker_is_running(container_id: str) -> bool:
     """Quick liveness check — ~10 ms."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "inspect", "--format", "{{.State.Running}}", container_id,
+        CONTAINER_CLI, "inspect", "--format", "{{.State.Running}}", container_id,
         stdout=PIPE, stderr=DEVNULL,
     )
     stdout, _ = await proc.communicate()
@@ -89,7 +90,7 @@ async def _current_image_id(image: str) -> str | None:
     if cached and time.time() - cached[1] < _IMAGE_ID_CACHE_SECONDS:
         return cached[0]
     proc = await asyncio.create_subprocess_exec(
-        "docker", "image", "inspect", "--format", "{{.Id}}", image,
+        CONTAINER_CLI, "image", "inspect", "--format", "{{.Id}}", image,
         stdout=PIPE, stderr=DEVNULL,
     )
     stdout, _ = await proc.communicate()
@@ -102,7 +103,7 @@ async def _current_image_id(image: str) -> str | None:
 async def _container_is_usable(container_id: str, image: str) -> bool:
     """Running, and started from the current build of the image (not one replaced by a deploy)."""
     proc = await asyncio.create_subprocess_exec(
-        "docker", "inspect", "--format", "{{.State.Running}} {{.Image}}", container_id,
+        CONTAINER_CLI, "inspect", "--format", "{{.State.Running}} {{.Image}}", container_id,
         stdout=PIPE, stderr=DEVNULL,
     )
     stdout, _ = await proc.communicate()
@@ -116,11 +117,11 @@ async def _container_is_usable(container_id: str, image: str) -> bool:
 async def _sanitize(container_id: str) -> bool:
     """
     Kill all user processes inside the container and wipe /app in a single
-    docker exec round-trip. Returns False if the container is no longer alive.
+    podman exec round-trip. Returns False if the container is no longer alive.
     Uses /proc to find PIDs — works on all Linux-based sandbox images.
     """
     proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", container_id,
+        CONTAINER_CLI, "exec", container_id,
         "sh", "-c",
         "for pid in $(ls /proc | grep -E '^[0-9]+$'); do [ $pid -gt 1 ] && kill -9 $pid 2>/dev/null; done; rm -rf /app/* /app/.[!.]* 2>/dev/null; true",
         stdout=DEVNULL, stderr=DEVNULL,
@@ -131,7 +132,7 @@ async def _sanitize(container_id: str) -> bool:
 
 async def _kill_container(container_id: str, temp_dir: str | None = None) -> None:
     proc = await asyncio.create_subprocess_exec(
-        "docker", "rm", "-f", container_id,
+        CONTAINER_CLI, "rm", "-f", container_id,
         stdout=DEVNULL, stderr=DEVNULL,
     )
     try:
@@ -268,7 +269,7 @@ async def ensure_pool_target(image: str, target: int) -> None:
             temp_dir = tempfile.mkdtemp(dir=container_sandbox_root)
             host_temp_dir = build_host_temp_dir(host_sandbox_root, temp_dir)
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,

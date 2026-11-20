@@ -12,6 +12,7 @@ from execution.exceptions import (
 )
 from execution.process import InPlaceResult
 from execution.sandbox_paths import build_host_temp_dir, get_sandbox_roots
+from config.limits import CONTAINER_CLI
 from config.limits import (
     DOCKER_MEMORY_LIMIT,
     DOCKER_MEMORY_SWAP,
@@ -162,7 +163,7 @@ class ExecutionPipeline:
             f.write(source_code)
 
         run_cmd = [
-            "docker", "run", "-i", "--rm",
+            CONTAINER_CLI, "run", "-i", "--rm",
             "--memory", DOCKER_MEMORY_LIMIT,
             "--memory-swap", DOCKER_MEMORY_SWAP,
             "--cpus", DOCKER_CPU_LIMIT,
@@ -288,6 +289,11 @@ class ExecutionPipeline:
                                 "failed_test_case_index": index,
                                 "actual_output": _reported(result, tc["expected_output"]),
                                 "expected_output": tc["expected_output"],
+                                # Outputs of the test cases that passed before this one.
+                                "actual_outputs": [
+                                    _reported(r, t["expected_output"])
+                                    for r, t in zip(actual_outputs[:index], self.request["test_cases"][:index])
+                                ],
                             })
                     actual_outputs = [
                         _reported(result, tc["expected_output"])
@@ -309,7 +315,8 @@ class ExecutionPipeline:
                             metrics.pipeline_run_duration_seconds.labels(language, "single", "error").observe(
                                 time.perf_counter() - run_started
                             )
-                            return finish(_failure(exc, index))
+                            # Outputs of the test cases that passed before this one.
+                            return finish({**_failure(exc, index), "actual_outputs": list(actual_outputs)})
 
                         if not _outputs_match(result, tc["expected_output"]):
                             return finish({
@@ -317,6 +324,7 @@ class ExecutionPipeline:
                                 "failed_test_case_index": index,
                                 "actual_output": _reported(result, tc["expected_output"]),
                                 "expected_output": tc["expected_output"],
+                                "actual_outputs": list(actual_outputs),
                             })
                         actual_outputs.append(_reported(result, tc["expected_output"]))
 

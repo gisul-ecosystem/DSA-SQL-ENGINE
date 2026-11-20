@@ -16,6 +16,7 @@ from execution.sandbox_paths import (
 from execution import container_pool
 from execution.docker_semaphore import docker_run_semaphore, compile_semaphore
 
+from config.limits import CONTAINER_CLI
 from config.limits import (
     EXECUTION_TIMEOUT_SECONDS,
     COMPILATION_TIMEOUT_SECONDS,
@@ -91,7 +92,7 @@ class JavaExecutor(BaseExecutor):
             self.host_temp_dir = build_host_temp_dir(host_sandbox_root, self.temp_dir)
 
             run_cmd = [
-                "docker", "run",
+                CONTAINER_CLI, "run",
                 "-d", "--rm",
                 "--memory", DOCKER_MEMORY_LIMIT,
                 "--memory-swap", DOCKER_MEMORY_SWAP,
@@ -123,7 +124,7 @@ class JavaExecutor(BaseExecutor):
             f.write(wrapped_code)
 
         compile_cmd = [
-            "docker", "exec", self.container_id,
+            CONTAINER_CLI, "exec", self.container_id,
             "javac", "-cp", ".:/opt/libs/*", "Main.java",
         ]
 
@@ -168,7 +169,7 @@ class JavaExecutor(BaseExecutor):
 
     def _java_exec_cmd(self):
         return [
-            "docker", "exec", "-i", self.container_id,
+            CONTAINER_CLI, "exec", "-i", self.container_id,
             "java",
             "-Xms16m", "-Xmx256m", "-Xss256m",
             "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1",
