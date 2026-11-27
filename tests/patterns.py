@@ -1639,3 +1639,90 @@ pattern(
     },
     expect="compilation_error",
 )
+
+# ---------------------------------------------------------------------------
+# Abuse and strictness regressions
+# ---------------------------------------------------------------------------
+
+# Printing forever must be stopped (output cap or time limit) and must not
+# leave the program running in the container or hang the worker.
+pattern(
+    "output_flood",
+    _fn("flood"),
+    [({"n": 1}, 1)],
+    {
+        "python": "class Solution:\n    def flood(self, n: int) -> int:\n        while n > 0:\n            print('x' * 1000)\n        return 0\n",
+        "javascript": "var flood = function(n) {\n    const s = 'x'.repeat(1000);\n    while (n > 0) console.log(s);\n    return 0;\n};\n",
+        "typescript": "function flood(n: number): number {\n    const s = 'x'.repeat(1000);\n    while (n > 0) console.log(s);\n    return 0;\n}\n",
+        "java": "class Solution {\n    public int flood(int n) {\n        String s = \"x\".repeat(1000);\n        while (n > 0) System.out.println(s);\n        return 0;\n    }\n}\n",
+        "kotlin": "class Solution {\n    fun flood(n: Int): Int {\n        val s = \"x\".repeat(1000)\n        while (n > 0) println(s)\n        return 0\n    }\n}\n",
+        "csharp": "public class Solution {\n    public int Flood(int n) {\n        string s = new string('x', 1000);\n        while (n > 0) Console.WriteLine(s);\n        return 0;\n    }\n}\n",
+        "cpp": "class Solution {\npublic:\n    int flood(int n) {\n        string s(1000, 'x');\n        while (n > 0) cout << s << endl;\n        return 0;\n    }\n};\n",
+        "c": "int flood(int n) {\n    char s[1001] = {0};\n    memset(s, 'x', 1000);\n    while (n > 0) puts(s);\n    return 0;\n}\n",
+        "go": "import \"fmt\"\n\nfunc flood(n int) int {\n    s := fmt.Sprintf(\"%01000d\", 0)\n    for n > 0 {\n        fmt.Println(s)\n    }\n    return 0\n}\n",
+        "rust": "impl Solution {\n    pub fn flood(n: i32) -> i32 {\n        let s = \"x\".repeat(1000);\n        while n > 0 {\n            println!(\"{}\", s);\n        }\n        0\n    }\n}\n",
+    },
+    expect=("runtime_error", "timeout"),
+    failed_index=0,
+)
+
+# Thousands of sleeping threads use up the container's pids limit; the
+# container must be discarded afterwards, not handed to the next submission.
+pattern(
+    "thread_flood",
+    _fn("threads"),
+    [({"n": 5000}, 1)],
+    {
+        "python": "import threading, time\n\nclass Solution:\n    def threads(self, n: int) -> int:\n        for _ in range(n):\n            threading.Thread(target=time.sleep, args=(60,), daemon=True).start()\n        time.sleep(60)\n        return 1\n",
+    },
+    expect=("runtime_error", "timeout"),
+    failed_index=0,
+)
+
+# 1 is not true: booleans must match booleans exactly.
+pattern(
+    "int_for_bool",
+    _fn("isEven", rust="is_even"),
+    [({"x": 2}, True)],
+    {
+        "python": "class Solution:\n    def isEven(self, x: int) -> int:\n        return 1\n",
+        "javascript": "var isEven = function(x) {\n    return 1;\n};\n",
+        "typescript": "function isEven(x: number): number {\n    return 1;\n}\n",
+        "java": "class Solution {\n    public int isEven(int x) {\n        return 1;\n    }\n}\n",
+        "kotlin": "class Solution {\n    fun isEven(x: Int): Int {\n        return 1\n    }\n}\n",
+        "csharp": "public class Solution {\n    public int IsEven(int x) {\n        return 1;\n    }\n}\n",
+        "cpp": "class Solution {\npublic:\n    int isEven(int x) {\n        return 1;\n    }\n};\n",
+        "c": "int isEven(int x) {\n    return 1;\n}\n",
+        "go": "func isEven(x int) int {\n    return 1\n}\n",
+        "rust": "impl Solution {\n    pub fn is_even(x: i32) -> i32 {\n        1\n    }\n}\n",
+    },
+    expect="wrong_answer",
+    failed_index=0,
+)
+
+# Returning the string "5" (or [5]) where the number 5 is expected is a wrong answer.
+pattern(
+    "string_for_number",
+    _fn("five"),
+    [({"n": 5}, 5)],
+    {
+        "python": "class Solution:\n    def five(self, n: int) -> str:\n        return str(n)\n",
+        "javascript": "var five = function(n) {\n    return String(n);\n};\n",
+        "java": "class Solution {\n    public String five(int n) {\n        return String.valueOf(n);\n    }\n}\n",
+    },
+    expect="wrong_answer",
+    failed_index=0,
+)
+
+pattern(
+    "singleton_list_for_scalar",
+    _fn("five"),
+    [({"n": 5}, 5)],
+    {
+        "python": "class Solution:\n    def five(self, n: int) -> List[int]:\n        return [n]\n",
+        "javascript": "var five = function(n) {\n    return [n];\n};\n",
+        "go": "func five(n int) []int {\n    return []int{n}\n}\n",
+    },
+    expect="wrong_answer",
+    failed_index=0,
+)

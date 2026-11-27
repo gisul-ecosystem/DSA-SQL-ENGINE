@@ -13,6 +13,7 @@ been idle longer than WARM_CONTAINER_TTL_SECONDS.
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -123,16 +124,33 @@ async def _sanitize(container_id: str) -> bool:
     proc = await asyncio.create_subprocess_exec(
         CONTAINER_CLI, "exec", container_id,
         "sh", "-c",
-        "for pid in $(ls /proc | grep -E '^[0-9]+$'); do [ $pid -gt 1 ] && kill -9 $pid 2>/dev/null; done; rm -rf /app/* /app/.[!.]* 2>/dev/null; true",
+        # Skip PID 1 (the keep-alive process) and this shell itself ($$).
+        "for pid in $(ls /proc | grep -E '^[0-9]+$'); do [ $pid -gt 1 ] && [ $pid -ne $$ ] && kill -9 $pid 2>/dev/null; done; rm -rf /app/* /app/.[!.]* 2>/dev/null; true",
         stdout=DEVNULL, stderr=DEVNULL,
     )
-    await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=15.0)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False
+    # A failed exec (e.g. the user's code used up the container's pids limit, so
+    # `sh` could not start) leaves the container dirty: never reuse it.
+    if proc.returncode != 0:
+        return False
     return await _docker_is_running(container_id)
+
+
+def force_remove_cmd(cli: str, container_id: str) -> list[str]:
+    """`rm -f` that kills at once. Podman otherwise waits the stop timeout
+    (10s) because the keep-alive `sleep infinity` ignores SIGTERM."""
+    no_grace = ["-t", "0"] if os.path.basename(cli).startswith("podman") else []
+    return [cli, "rm", "-f", *no_grace, container_id]
 
 
 async def _kill_container(container_id: str, temp_dir: str | None = None) -> None:
     proc = await asyncio.create_subprocess_exec(
-        CONTAINER_CLI, "rm", "-f", container_id,
+        *force_remove_cmd(CONTAINER_CLI, container_id),
         stdout=DEVNULL, stderr=DEVNULL,
     )
     try:
@@ -203,7 +221,8 @@ async def release(image: str, container_id: str, temp_dir: str, host_temp_dir: s
     )
     if not alive:
         metrics.docker_pool_events_total.labels(image, "release_dead").inc()
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        # Remove it too: a container that could not be sanitized may still be running.
+        asyncio.create_task(_kill_container(container_id, temp_dir))
         return
 
     r = get_redis()

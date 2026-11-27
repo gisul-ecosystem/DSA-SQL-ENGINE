@@ -98,23 +98,101 @@ def error_message(parsed: dict | None, stderr: str, returncode: int) -> str:
     return "Invalid output format"
 
 
+def _exec_container(cmd: list[str]) -> str | None:
+    """The container id in a `<cli> exec [options] <container> ...` command, else None."""
+    if len(cmd) < 3 or cmd[1] != "exec":
+        return None
+    i = 2
+    while i < len(cmd) and cmd[i].startswith("-"):
+        # Options that take a separate value (-e VAR=1, -w /dir, -u user).
+        i += 2 if cmd[i] in ("-e", "--env", "-w", "--workdir", "-u", "--user") else 1
+    return cmd[i] if i < len(cmd) else None
+
+
+async def _abort(proc: asyncio.subprocess.Process, cmd: list[str]) -> None:
+    """
+    Stop a run that timed out or flooded its output.
+
+    Killing the `podman exec` client does not stop the program inside the
+    container, and the exec session keeps the pipes open, so waiting on the
+    client alone can block forever while the program keeps running. Removing
+    the container kills everything in it; the pool then discards it on
+    release instead of handing a polluted container to the next submission.
+    """
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    container_id = _exec_container(cmd)
+    if container_id:
+        from execution.container_pool import force_remove_cmd
+
+        rm = await asyncio.create_subprocess_exec(
+            *force_remove_cmd(cmd[0], container_id),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(rm.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            rm.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        pass
+    # Close the pipes now rather than leaving them to garbage collection,
+    # which can run after the event loop has closed.
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        transport.close()
+
+
+async def _run_capped(cmd: list[str], payload: bytes, timeout: float) -> tuple[bytes, bytes, int]:
+    """
+    Run `cmd` with `payload` on stdin, reading stdout/stderr as they arrive.
+
+    Raises ExecutionTimeoutError (with `partial_stdout`) after `timeout` seconds,
+    and RuntimeExecutionError once either stream exceeds MAX_STDOUT_BYTES, so a
+    print loop is stopped instead of being buffered without bound.
+    """
+    proc = await asyncio.create_subprocess_exec(*cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    out_buf, err_buf = bytearray(), bytearray()
+
+    async def _drain(stream, buf):
+        while chunk := await stream.read(65536):
+            buf.extend(chunk)
+            if len(buf) > MAX_STDOUT_BYTES:
+                raise RuntimeExecutionError("Output limit exceeded")
+
+    async def _communicate():
+        try:
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        proc.stdin.close()
+        await asyncio.gather(_drain(proc.stdout, out_buf), _drain(proc.stderr, err_buf))
+        return await proc.wait()
+
+    try:
+        returncode = await asyncio.wait_for(_communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        await _abort(proc, cmd)
+        exc = ExecutionTimeoutError()
+        exc.partial_stdout = bytes(out_buf)
+        raise exc
+    except RuntimeExecutionError:
+        await _abort(proc, cmd)
+        raise
+    return bytes(out_buf), bytes(err_buf), returncode
+
+
 async def run_in_sandbox(cmd: list[str], payload: bytes, timeout: float) -> tuple[str, str, int]:
     """Run `cmd` with `payload` on stdin. Raises on timeout or output overflow."""
-    proc = await asyncio.create_subprocess_exec(*cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(payload), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise ExecutionTimeoutError()
-
-    if len(stdout) > MAX_STDOUT_BYTES:
-        raise RuntimeExecutionError("Output limit exceeded")
-
+    stdout, stderr, returncode = await _run_capped(cmd, payload, timeout)
     return (
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
-        proc.returncode,
+        returncode,
     )
 
 
@@ -141,35 +219,16 @@ async def run_batch_wrapper(cmd: list[str], payload: bytes, timeout: float, coun
     ({"index": i, "result": ...}), so a crash part-way through still reports
     which test case failed.
     """
-    proc = await asyncio.create_subprocess_exec(*cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-    out_buf, err_buf = bytearray(), bytearray()
-
-    async def _drain(stream, buf):
-        while chunk := await stream.read(65536):
-            buf.extend(chunk)
-            if len(buf) > MAX_STDOUT_BYTES:
-                raise RuntimeExecutionError("Output limit exceeded")
-
-    async def _communicate():
-        proc.stdin.write(payload)
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await asyncio.gather(_drain(proc.stdout, out_buf), _drain(proc.stderr, err_buf))
-        return await proc.wait()
-
     try:
-        returncode = await asyncio.wait_for(_communicate(), timeout=timeout)
-    except (asyncio.TimeoutError, RuntimeExecutionError) as exc:
-        proc.kill()
-        await proc.wait()
-        if isinstance(exc, RuntimeExecutionError):
-            raise
+        out, err, returncode = await _run_capped(cmd, payload, timeout)
+    except ExecutionTimeoutError as exc:
         # Test cases that already printed a result passed the time limit.
-        done = len(parse_all_wrapper_outputs(out_buf.decode("utf-8", errors="replace")))
+        partial = getattr(exc, "partial_stdout", b"").decode("utf-8", errors="replace")
+        done = len(parse_all_wrapper_outputs(partial))
         raise ExecutionTimeoutError(failed_test_case_index=min(done, count - 1))
 
-    stdout = out_buf.decode("utf-8", errors="replace")
-    stderr = err_buf.decode("utf-8", errors="replace")
+    stdout = out.decode("utf-8", errors="replace")
+    stderr = err.decode("utf-8", errors="replace")
     blocks = parse_all_wrapper_outputs(stdout)
     results = []
     for block in blocks:
