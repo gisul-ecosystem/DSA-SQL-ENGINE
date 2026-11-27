@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -44,68 +45,60 @@ def _floats_close(a: float, b: float) -> bool:
     return abs(a - b) <= FLOAT_TOLERANCE * max(1.0, abs(a), abs(b))
 
 
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _values_match(actual: object, expected: object) -> bool:
-    """Structural comparison used inside lists/objects: exact, floats within tolerance."""
+    """Structural comparison, also used inside lists/objects: exact, floats within tolerance.
+
+    Booleans only match booleans (Python's True == 1 would otherwise accept a
+    function that returns 1 where true is expected, also inside lists).
+    """
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return isinstance(actual, bool) and isinstance(expected, bool) and actual == expected
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(_values_match(a, e) for a, e in zip(actual, expected))
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(_values_match(actual[k], expected[k]) for k in actual)
     if actual == expected:
         return True
     if (actual is None and expected == []) or (actual == [] and expected is None):
         return True
-    if (
-        (isinstance(actual, float) or isinstance(expected, float))
-        and isinstance(actual, (int, float)) and isinstance(expected, (int, float))
-        and not isinstance(actual, bool) and not isinstance(expected, bool)
-    ):
+    if (isinstance(actual, float) or isinstance(expected, float)) and _is_number(actual) and _is_number(expected):
         return _floats_close(float(actual), float(expected))
-    if isinstance(actual, list) and isinstance(expected, list) and len(actual) == len(expected):
-        return all(_values_match(a, e) for a, e in zip(actual, expected))
-    if isinstance(actual, dict) and isinstance(expected, dict) and actual.keys() == expected.keys():
-        return all(_values_match(actual[k], expected[k]) for k in actual)
     return False
 
 
 def _outputs_match(actual: object, expected: object) -> bool:
-    """Compare actual vs expected output with type coercion for common edge cases.
+    """Compare the function's result with the expected output.
 
-    Strict equality is tried first. If that fails we apply these relaxations:
+    Exact match, with these relaxations:
 
-    1. Numeric string / number equivalence: a function that returns the string
-       "-1" should match expected_output: -1 (and vice-versa).  This avoids
-       penalising users for the return type of string-returning functions when
-       the value happens to be numeric.
-
-    2. List-of-one vs scalar: some languages (e.g. Go wrappers) wrap a single
-       return value in a list; [42] should equal 42.
-
-    3. Floats match within a relative/absolute tolerance of 1e-5, also inside
+    1. Floats match within a relative/absolute tolerance of 1e-5, also inside
        lists and objects (0.1 + 0.2 matches 0.3).
 
-    4. null matches []: an empty tree or linked list is returned as null by
+    2. null matches []: an empty tree or linked list is returned as null by
        most languages but written as [] in LeetCode-style expected output.
+
+    3. An expected output stored as numeric text ("6") matches the number 6.
+       Only in that direction: expected outputs are typed by question authors,
+       while a function that returns the string "6" where a number is expected
+       has the wrong return type and is a wrong answer.
+
+    Booleans never match numbers, and [x] never matches x.
     """
     if isinstance(actual, InPlaceResult):
         return _outputs_match(actual.value, expected) or _outputs_match(actual.mutated, expected)
 
-    # Exact, floats within tolerance, null vs [] - also inside lists and objects.
-    # The looser rules below apply to the top-level value only.
     if _values_match(actual, expected):
         return True
 
-    # Numeric string <-> number
-    try:
-        if str(actual) == str(expected):
-            return True
-        if float(str(actual)) == float(str(expected)):
-            return True
-    except (ValueError, TypeError):
-        pass
-
-    # [value] vs value
-    if isinstance(actual, list) and len(actual) == 1:
-        if _outputs_match(actual[0], expected):
-            return True
-    if isinstance(expected, list) and len(expected) == 1:
-        if _outputs_match(actual, expected[0]):
-            return True
+    if isinstance(expected, str) and _is_number(actual):
+        try:
+            return _values_match(actual, json.loads(expected.strip()))
+        except ValueError:
+            return False
 
     return False
 
